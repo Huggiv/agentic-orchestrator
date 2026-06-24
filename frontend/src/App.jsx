@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import ExecutingJobs from './ExecutingJobs'
-import JobFlowSteps, { computeFlowProgress } from './JobFlowSteps'
+import JobFlowSteps, { computeFlowProgress, buildLogRows, RawLogsTable } from './JobFlowSteps'
+import { getModels } from './services/models'
 
 const defaultPlan = [
   'Analyze impacted files',
@@ -120,6 +121,9 @@ export default function App() {
   const [ticket, setTicket] = useState('')
   const [availableAgents, setAvailableAgents] = useState(['SWE'])
   const [selectedAgent, setSelectedAgent] = useState('SWE')
+  const [availableModels, setAvailableModels] = useState([])
+  const [selectedModel, setSelectedModel] = useState('')   // '' = Auto (no --model flag)
+  const [ticketError, setTicketError] = useState('')
   const [repository, setRepository] = useState('vittal-huggi_ADVNTST/v93000_telemetry_station')
   const [reviewer, setReviewer] = useState('')
   const [result, setResult] = useState(null)
@@ -132,6 +136,10 @@ export default function App() {
   const [expandedPanels, setExpandedPanels] = useState({ trigger: true })
   const [selectedArtifact, setSelectedArtifact] = useState(null)
   const [historySearchFilter, setHistorySearchFilter] = useState('')
+  // openRawLogs: Set of entry IDs whose "Raw Logs" panel is force-opened
+  // highlightedSteps: { [entryId]: stepKey } — step that triggered the expand
+  const [openRawLogs, setOpenRawLogs] = useState(new Set())
+  const [highlightedSteps, setHighlightedSteps] = useState({})
 
   const loadHistory = async () => {
     const response = await fetch('/api/orchestrate/history?limit=30&include_progress=true')
@@ -174,6 +182,11 @@ export default function App() {
       setAvailableAgents(['SWE'])
       setSelectedAgent('SWE')
     })
+    // Fetch models once at startup via the singleton — never re-fetches on re-renders.
+    getModels().then((models) => {
+      setAvailableModels(models)
+      // Keep selectedModel as '' (Auto); never auto-select a specific model.
+    })
   }, [])
 
   useEffect(() => {
@@ -199,8 +212,23 @@ export default function App() {
     loadHistory().catch(() => undefined)
   }
 
+  // Jira ticket ID validation: must match pattern like PROJ-123
+  const JIRA_TICKET_PATTERN = /^[A-Z][A-Z0-9_]+-\d+$/
+
+  const validateTicket = (value) => {
+    if (!value.trim()) return 'Jira Ticket ID is required.'
+    if (!JIRA_TICKET_PATTERN.test(value.trim())) return 'Invalid format. Expected e.g. PROJ-123 (uppercase letters, digits, then a number).'
+    return ''
+  }
+
   const triggerOrchestration = async (event) => {
     event.preventDefault()
+    const validationErr = validateTicket(ticket)
+    if (validationErr) {
+      setTicketError(validationErr)
+      return
+    }
+    setTicketError('')
     setError('')
     setResult(null)
     setProgress([])
@@ -213,6 +241,7 @@ export default function App() {
         body: JSON.stringify({
           jira_ticket_id: ticket,
           selected_agent: selectedAgent,
+          selected_model: selectedModel || null,
           repository,
           base_branch: 'development',
           reviewer: reviewer || null,
@@ -234,13 +263,18 @@ export default function App() {
         jira_ticket_id: ticket,
         repository,
         selected_agent: selectedAgent,
+        selected_model: selectedModel || null,
       }
       setRunningJobs((prev) => [...prev, newJob])
       setActiveTab('executing')
-      setJobStatus('running')
-      
-      // Clear form for next run
+
+      // Reset Run tab to idle/clean state for the next submission
+      setJobStatus('idle')
       setTicket('')
+      setReviewer('')
+      setResult(null)
+      setError('')
+      setTicketError('')
     } catch (err) {
       setError(err.message)
       setJobStatus('failed')
@@ -381,7 +415,17 @@ export default function App() {
               <form onSubmit={triggerOrchestration} className="form-grid">
                 <label>
                   Jira Ticket ID
-                  <input value={ticket} onChange={(e) => setTicket(e.target.value)} placeholder="PROJ-123" required />
+                  <input
+                    value={ticket}
+                    onChange={(e) => {
+                      setTicket(e.target.value)
+                      if (ticketError) setTicketError('')
+                    }}
+                    placeholder="PROJ-123"
+                    required
+                    style={ticketError ? { borderColor: '#dc3545' } : undefined}
+                  />
+                  {ticketError && <span style={{ color: '#dc3545', fontSize: '0.78rem', marginTop: '0.2rem', display: 'block' }}>{ticketError}</span>}
                 </label>
 
                 <label>
@@ -389,6 +433,16 @@ export default function App() {
                   <select value={selectedAgent} onChange={(e) => setSelectedAgent(e.target.value)}>
                     {availableAgents.map((agent) => (
                       <option key={agent} value={agent}>{agent}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  Model
+                  <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+                    <option value=''>Auto</option>
+                    {availableModels.map((model) => (
+                      <option key={model.id} value={model.id}>{model.name}</option>
                     ))}
                   </select>
                 </label>
@@ -521,6 +575,10 @@ export default function App() {
                           View PR
                         </a>
                       )}
+                      <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.78rem', color: '#4e6c80' }}>
+                        Agent: <strong>{entry.request?.selected_agent || 'SWE'}</strong>
+                        {' · '}Model: <strong>{entry.request?.selected_model || 'Auto'}</strong>
+                      </span>
                     </div>
                     <div className="history-header-right">
                       <span className="history-duration-pill">
@@ -529,7 +587,11 @@ export default function App() {
                       <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
                     </div>
                   </div>
-                  {entry.error && <div className="history-error">{entry.error}</div>}
+                  {entry.status === 'failed' && entry.error && (
+                    <div className="history-error" style={{ fontStyle: 'italic', fontSize: '0.78rem' }}>
+                      ⚠ Failed — click the highlighted step in the flow diagram for details
+                    </div>
+                  )}
                   {entry.result && (
                     <div className="history-result">
                       {entry.result.usage && (
@@ -595,20 +657,29 @@ export default function App() {
 
                   <details className="history-collapsible history-logs" open={entry.status === 'running' || entry.status === 'queued'}>
                     <summary>Flow Diagram Steps</summary>
-                    <JobFlowSteps idPrefix={entry.id} entry={entry} />
+                    <JobFlowSteps
+                      idPrefix={entry.id}
+                      entry={entry}
+                      onFailedStepClick={(stepKey) => {
+                        setOpenRawLogs((prev) => new Set([...prev, entry.id]))
+                        setHighlightedSteps((prev) => ({ ...prev, [entry.id]: stepKey }))
+                      }}
+                    />
                   </details>
 
                   {(entry.status === 'running' || entry.status === 'queued' || entry.progress?.length > 0) && (
-                    <details className="history-collapsible history-logs">
+                    <details
+                      className="history-collapsible history-logs"
+                      open={openRawLogs.has(entry.id) || entry.status === 'running' || entry.status === 'queued'}
+                      onToggle={(e) => {
+                        if (!e.target.open) {
+                          setOpenRawLogs((prev) => { const next = new Set(prev); next.delete(entry.id); return next })
+                          setHighlightedSteps((prev) => { const next = { ...prev }; delete next[entry.id]; return next })
+                        }
+                      }}
+                    >
                       <summary>Raw Logs and Stages</summary>
-                      <ul>
-                        {(entry.progress || []).map((log, idx) => (
-                          <li key={`${entry.id}-log-${idx}`}>
-                            <strong>{log.name}</strong> - {log.status}
-                            {log.details ? ` (${log.details})` : ''}
-                          </li>
-                        ))}
-                      </ul>
+                      <RawLogsTable rows={buildLogRows(entry)} highlightKey={highlightedSteps[entry.id] || null} />
                     </details>
                   )}
                 </div>

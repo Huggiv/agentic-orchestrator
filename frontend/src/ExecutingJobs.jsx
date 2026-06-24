@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import JobFlowSteps from './JobFlowSteps'
+import JobFlowSteps, { buildLogRows, RawLogsTable } from './JobFlowSteps'
 
 const parseApiPayload = (raw) => {
   if (!raw) return {}
@@ -12,6 +12,8 @@ const parseApiPayload = (raw) => {
 
 export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
   const [jobDetails, setJobDetails] = useState({})
+  // highlightedSteps: { [jobId]: stepKey } — set when a failed step card is clicked
+  const [highlightedSteps, setHighlightedSteps] = useState({})
 
   useEffect(() => {
     if (!Array.isArray(runningJobs) || runningJobs.length === 0) {
@@ -113,6 +115,7 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               </h3>
               <p style={{ margin: '0 0 0.45rem 0', fontSize: '0.8rem', color: '#4e6c80' }}>
                 Agent: <strong>{job.selected_agent || 'SWE'}</strong>
+                {' · '}Model: <strong>{job.selected_model || 'Auto'}</strong>
               </p>
               <div
                 style={{
@@ -131,8 +134,8 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
             </div>
 
             {details.error && (
-              <div style={{ padding: '0.5rem', background: '#fff3cd', border: '1px solid #ffc107', borderRadius: '4px', marginBottom: '1rem', color: '#856404', fontSize: '0.85rem' }}>
-                {details.error}
+              <div style={{ padding: '0.25rem 0.6rem', background: '#450a0a25', border: '1px solid #ef444440', borderRadius: '6px', marginBottom: '0.5rem', color: '#f87171', fontSize: '0.78rem', fontStyle: 'italic' }}>
+                ⚠ Failed — click the highlighted step below for details
               </div>
             )}
 
@@ -143,8 +146,27 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
                 status: details.status,
                 progress,
                 result: details.result,
+                error: details.error,
               }}
+              onFailedStepClick={(stepKey) => setHighlightedSteps((prev) => ({ ...prev, [job.id]: stepKey }))}
             />
+
+            {(progress.length > 0 || highlightedSteps[job.id]) && (
+              <details
+                className="history-collapsible history-logs"
+                style={{ marginTop: '0.75rem' }}
+                open={!!highlightedSteps[job.id]}
+                onToggle={(e) => {
+                  if (!e.target.open) setHighlightedSteps((prev) => { const next = { ...prev }; delete next[job.id]; return next })
+                }}
+              >
+                <summary>Raw Logs and Stages</summary>
+                <RawLogsTable
+                  rows={buildLogRows({ status: details.status, progress, result: details.result, error: details.error })}
+                  highlightKey={highlightedSteps[job.id] || null}
+                />
+              </details>
+            )}
           </div>
         )
       })}
