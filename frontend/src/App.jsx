@@ -260,58 +260,72 @@ export default function App() {
 
     return (
       <div className="usage-summary">
-        <div className="floating-header-shell">
-          <header className="hero">
-            <div className="hero-copy">
-              <span className="hero-eyebrow">Autonomous Delivery Control Plane</span>
-              <h1>Agentic Orchestration Console</h1>
-              <p>Drive Jira-scoped implementation, validation, and pull request creation through a Copilot-powered execution path.</p>
-            </div>
-            <div className="hero-metrics">
-              <div className="hero-metric">
-                <span className="hero-metric-value">{JOB_STATUS_LABELS[jobStatus] || jobStatus}</span>
-                <span className="hero-metric-label">Current Run</span>
-              </div>
-              <div className="hero-metric">
-                <span className="hero-metric-value">{history.length}</span>
-                <span className="hero-metric-label">Stored Runs</span>
-              </div>
-            </div>
-          </header>
-
-          <nav className="tabs-navigation">
-            <button className={`tab-button${activeTab === 'run' ? ' active' : ''}`} onClick={() => setActiveTab('run')}>
-              Run
-            </button>
-            <button className={`tab-button${activeTab === 'history' ? ' active' : ''}`} onClick={() => setActiveTab('history')}>
-              History {history.length > 0 && <span className="tab-badge">{history.length}</span>}
-            </button>
-          </nav>
-        </div>
-        <div className="hero-metrics">
-          <div className="hero-metric">
-            <span className="hero-metric-value">{JOB_STATUS_LABELS[jobStatus] || jobStatus}</span>
-            <span className="hero-metric-label">Current Run</span>
+        <div className="usage-grid">
+          <div className="usage-card">
+            <span className="usage-value">{formatInt(changes.added)}</span>
+            <span className="usage-label">Lines Added</span>
           </div>
-          <div className="hero-metric">
-            <span className="hero-metric-value">{history.length}</span>
-            <span className="hero-metric-label">Stored Runs</span>
+          <div className="usage-card">
+            <span className="usage-value">{formatInt(changes.removed)}</span>
+            <span className="usage-label">Lines Removed</span>
           </div>
-          <div className="hero-metric">
-            <span className="hero-metric-value">{completedSteps}/{FLOW_STEPS.length}</span>
-            <span className="hero-metric-label">Flow Progress</span>
+          <div className="usage-card">
+            <span className="usage-value">{formatInt(tokens.total_tokens)}</span>
+            <span className="usage-label">Total Tokens</span>
+          </div>
+          <div className="usage-card usage-card--cost">
+            <span className="usage-value">{formatCredits(usage.ai_credits_used)}</span>
+            <span className="usage-label">AI Credits</span>
+          </div>
+          <div className="usage-card usage-card--rate">
+            <span className="usage-value">${formatCost(usage.estimated_cost_usd)}</span>
+            <span className="usage-label">Estimated Cost</span>
           </div>
         </div>
-      </header>
+        <p>
+          Runtime: <strong>{ai.elapsed_text || '-'}</strong>
+        </p>
+        <p>
+          Throughput: <strong>{ai.tokens_per_second_text || '-'}</strong>
+        </p>
+      </div>
+    )
+  }
 
-      <nav className="tabs-navigation">
-        <button className={`tab-button${activeTab === 'run' ? ' active' : ''}`} onClick={() => setActiveTab('run')}>
-          Run
-        </button>
-        <button className={`tab-button${activeTab === 'history' ? ' active' : ''}`} onClick={() => setActiveTab('history')}>
-          History {history.length > 0 && <span className="tab-badge">{history.length}</span>}
-        </button>
-      </nav>
+  return (
+    <div className="page">
+      <div className="floating-header-shell">
+        <header className="hero">
+          <div className="hero-copy">
+            <span className="hero-eyebrow">Autonomous Delivery Control Plane</span>
+            <h1>Agentic Orchestration Console</h1>
+            <p>Drive Jira-scoped implementation, validation, and pull request creation through a Copilot-powered execution path.</p>
+          </div>
+          <div className="hero-metrics">
+            <div className="hero-metric">
+              <span className="hero-metric-value">{JOB_STATUS_LABELS[jobStatus] || jobStatus}</span>
+              <span className="hero-metric-label">Current Run</span>
+            </div>
+            <div className="hero-metric">
+              <span className="hero-metric-value">{history.length}</span>
+              <span className="hero-metric-label">Stored Runs</span>
+            </div>
+            <div className="hero-metric">
+              <span className="hero-metric-value">{completedSteps}/{FLOW_STEPS.length}</span>
+              <span className="hero-metric-label">Flow Progress</span>
+            </div>
+          </div>
+        </header>
+
+        <nav className="tabs-navigation">
+          <button className={`tab-button${activeTab === 'run' ? ' active' : ''}`} onClick={() => setActiveTab('run')}>
+            Run
+          </button>
+          <button className={`tab-button${activeTab === 'history' ? ' active' : ''}`} onClick={() => setActiveTab('history')}>
+            History {history.length > 0 && <span className="tab-badge">{history.length}</span>}
+          </button>
+        </nav>
+      </div>
 
       {activeTab === 'run' && (
         <div className="run-shell">

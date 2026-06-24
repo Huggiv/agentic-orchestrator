@@ -61,6 +61,12 @@ Use Docker Compose to run backend and frontend together:
 2. Start both services:
 
 ```bash
+docker-compose up --build
+```
+
+If your Docker installation supports Compose v2, the equivalent command is:
+
+```bash
 docker compose up --build
 ```
 
@@ -73,6 +79,12 @@ Services:
 - Backend: `http://localhost:8015`
 
 To stop services:
+
+```bash
+docker-compose down
+```
+
+Compose v2 equivalent:
 
 ```bash
 docker compose down
