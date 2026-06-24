@@ -161,6 +161,7 @@ project = "OTF" AND status != "DONE" ORDER BY updated DESC
 
 ### Orchestration
 
+- `GET /api/agents`
 - `POST /api/orchestrate` (returns `job_id`)
 - `GET /api/orchestrate/{job_id}`
 - `GET /api/orchestrate/history?limit=20`
@@ -170,6 +171,7 @@ Sample request:
 ```json
 {
   "jira_ticket_id": "PROJ-123",
+  "selected_agent": "SWE",
   "repository": "owner/repository",
   "base_branch": "development",
   "reviewer": "teammate-user",
@@ -203,6 +205,8 @@ Sample request:
 
 Generated architecture and project documentation:
 
+- `changelog.md`
+- `docs/releases/v1.0.0.md`
 - `docs/project-summary.md`
 - `docs/diagrams/high-level-architecture.puml`
 - `docs/diagrams/processing-pipeline.puml`
