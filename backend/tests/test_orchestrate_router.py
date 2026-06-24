@@ -27,10 +27,12 @@ def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
         repository,
         base_branch,
         reviewer,
+        selected_agent,
         commit_message,
         change_plan,
         progress_callback,
     ):
+        assert selected_agent == "SWE"
         progress_callback({"name": "prepare_branch", "status": "running", "details": base_branch, "timestamp": "2026-06-23T00:00:01+00:00"})
         progress_callback({"name": "prepare_branch", "status": "success", "details": f"feature/{jira_ticket_id.lower()}", "timestamp": "2026-06-23T00:00:03+00:00"})
         return {
@@ -51,6 +53,7 @@ def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
                 "repository": "owner/repo",
                 "base_branch": "development",
                 "reviewer": None,
+                "selected_agent": "SWE",
                 "commit_message": "feat(otf-222): automated implementation",
                 "change_plan": ["Implement", "Test"],
             },
@@ -68,6 +71,18 @@ def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
         assert len(items) == 1
         assert items[0]["id"] == job_id
         assert items[0]["request"]["jira_ticket_id"] == "OTF-222"
+        assert items[0]["request"]["selected_agent"] == "SWE"
         assert items[0]["result"]["pull_request_url"] == "https://github.com/owner/repo/pull/1"
 
     reset_history_store_for_tests()
+
+
+def test_agents_endpoint_lists_available_agents(monkeypatch):
+    monkeypatch.setattr("app.routers.orchestrate._discover_agent_names", lambda: ["DevOps Expert", "SWE"])
+
+    with TestClient(app) as client:
+        response = client.get("/api/agents")
+        response.raise_for_status()
+        payload = response.json()
+
+    assert payload == {"items": ["DevOps Expert", "SWE"]}

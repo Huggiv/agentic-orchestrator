@@ -7,9 +7,11 @@ from app.orchestration import (
     COPILOT_AUTH_ERROR,
     OrchestrationError,
     _build_usage_from_session_logs,
+    _count_commits_ahead,
     _extract_copilot_session_id,
     _prepare_env,
     _run_copilot_prompt,
+    _select_copilot_agent,
 )
 
 
@@ -40,9 +42,64 @@ def test_run_copilot_prompt_rewrites_auth_error(monkeypatch):
     monkeypatch.setattr("app.orchestration._run", fake_run)
 
     with pytest.raises(OrchestrationError, match="Copilot CLI authentication failed") as exc_info:
-        _run_copilot_prompt("hello", cwd="/tmp", env={"COPILOT_GITHUB_TOKEN": "token"})
+        _run_copilot_prompt("hello", cwd="/tmp", env={"COPILOT_GITHUB_TOKEN": "token"}, agent_name="SWE")
 
     assert str(exc_info.value) == COPILOT_AUTH_ERROR
+
+
+def test_run_copilot_prompt_includes_agent_flag(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, cwd, env):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return "ok"
+
+    monkeypatch.setattr("app.orchestration._run", fake_run)
+
+    output = _run_copilot_prompt("hello", cwd="/tmp", env={"COPILOT_GITHUB_TOKEN": "token"}, agent_name="SWE")
+
+    assert output == "ok"
+    assert captured["cmd"][:3] == ["copilot", "--agent", "SWE"]
+
+
+def test_select_copilot_agent_defaults_to_swe():
+    agent, reason = _select_copilot_agent(
+        {
+            "summary": "Fix backend pagination bug",
+            "description": "Adjust SQL query and API response structure",
+            "type": "Bug",
+            "labels": ["backend"],
+        },
+        ["Implement API fix", "Add regression test"],
+    )
+
+    assert agent == "SWE"
+    assert "Default agent" in reason
+
+
+def test_select_copilot_agent_uses_specialist_for_jira_requirement():
+    agent, reason = _select_copilot_agent(
+        {
+            "summary": "Harden GitHub Actions workflow",
+            "description": "Pin action versions and enforce least privilege permissions",
+            "type": "Story",
+            "labels": ["ci", "security"],
+        },
+        [],
+    )
+
+    assert agent == "GitHub Actions Expert"
+    assert "keyword" in reason
+
+
+def test_count_commits_ahead_parses_integer(monkeypatch):
+    monkeypatch.setattr("app.orchestration._run", lambda *args, **kwargs: "3")
+
+    count = _count_commits_ahead(repo_path="/tmp", env={}, base_branch="development")
+
+    assert count == 3
 
 
 def test_extract_copilot_session_id_from_resume_text():

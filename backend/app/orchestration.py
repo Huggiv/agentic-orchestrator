@@ -37,6 +37,62 @@ COPILOT_AUTH_ERROR = (
     "for git and PR APIs, but Copilot CLI should use a dedicated Copilot-capable token."
 )
 
+DEFAULT_COPILOT_AGENT = "SWE"
+_SPECIALIST_AGENT_RULES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "GitHub Actions Expert",
+        (
+            "github action",
+            "github actions",
+            "workflow",
+            "ci/cd",
+            "pipeline",
+            ".github/workflows",
+            "action.yml",
+            "action yaml",
+        ),
+    ),
+    (
+        "Expert React Frontend Engineer",
+        (
+            "frontend",
+            "react",
+            "vite",
+            "component",
+            "jsx",
+            "css",
+            "ui",
+            "ux",
+        ),
+    ),
+    (
+        "DevOps Expert",
+        (
+            "devops",
+            "kubernetes",
+            "k8s",
+            "helm",
+            "terraform",
+            "docker",
+            "deployment",
+            "infrastructure",
+            "sre",
+            "observability",
+        ),
+    ),
+    (
+        "Project Documenter",
+        (
+            "documentation",
+            "document",
+            "readme",
+            "architecture diagram",
+            "plantuml",
+            "docx",
+        ),
+    ),
+]
+
 
 def _run(cmd: list[str], cwd: str, env: dict[str, str]) -> str:
     proc = subprocess.run(
@@ -179,12 +235,36 @@ def _copilot_auth_source(env: dict[str, str]) -> str:
     return "GITHUB_TOKEN"
 
 
-def _run_copilot_prompt(prompt: str, cwd: str, env: dict[str, str]) -> str:
+def _select_copilot_agent(issue: dict, change_plan: list[str]) -> tuple[str, str]:
+    labels = issue.get("labels") if isinstance(issue.get("labels"), list) else []
+    corpus = "\n".join(
+        [
+            str(issue.get("summary", "")),
+            str(issue.get("description", "")),
+            str(issue.get("type", "")),
+            str(issue.get("status", "")),
+            str(issue.get("priority", "")),
+            "\n".join(str(label) for label in labels),
+            "\n".join(change_plan),
+        ]
+    ).lower()
+
+    for agent_name, keywords in _SPECIALIST_AGENT_RULES:
+        for keyword in keywords:
+            if keyword in corpus:
+                return agent_name, f"Matched Jira requirement keyword: {keyword}"
+
+    return DEFAULT_COPILOT_AGENT, "Default agent for code implementation"
+
+
+def _run_copilot_prompt(prompt: str, cwd: str, env: dict[str, str], agent_name: str) -> str:
     """Run Copilot CLI in non-interactive mode with full tool permissions."""
     try:
         return _run(
             [
                 "copilot",
+                "--agent",
+                agent_name,
                 "--allow-all-tools",
                 "--allow-all-paths",
                 "--allow-all-urls",
@@ -263,6 +343,18 @@ def _collect_change_stats(repo_path: str, env: dict[str, str]) -> dict[str, int]
             removed += int(parts[1])
 
     return {"added": added, "removed": removed}
+
+
+def _count_commits_ahead(repo_path: str, env: dict[str, str], base_branch: str) -> int:
+    output = _run(
+        ["git", "rev-list", "--count", f"{base_branch}..HEAD"],
+        cwd=repo_path,
+        env=env,
+    )
+    try:
+        return int(output.strip())
+    except ValueError:
+        return 0
 
 
 def _collect_repo_instruction_context(repo_path: str) -> list[dict[str, str]]:
@@ -445,6 +537,7 @@ def run_orchestration(
     reviewer: str | None,
     commit_message: str,
     change_plan: list[str],
+    selected_agent: str | None = None,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     env = _prepare_env()
@@ -533,6 +626,20 @@ def run_orchestration(
     _emit_progress(progress_callback, "read_jira", "success", summary or jira_ticket_id)
     steps.append(StepResult(name="read_jira_issue", status="success", details=summary or jira_ticket_id))
 
+    if selected_agent and selected_agent.strip():
+        selected_agent = selected_agent.strip()
+        selected_agent_reason = "Selected by user input"
+    else:
+        selected_agent, selected_agent_reason = _select_copilot_agent(issue, change_plan)
+    _emit_progress(progress_callback, "select_copilot_agent", "success", f"{selected_agent} ({selected_agent_reason})")
+    steps.append(
+        StepResult(
+            name="select_copilot_agent",
+            status="success",
+            details=f"{selected_agent}: {selected_agent_reason}",
+        )
+    )
+
     effective_plan = change_plan or [
         "Implement code changes for Jira ticket description",
         "Add tests or validation updates for DoD",
@@ -562,6 +669,7 @@ def run_orchestration(
     full_prompt = (
         f"Repository: {repo_slug}\n"
         f"Jira Ticket: {jira_ticket_id}\n"
+        f"Selected Copilot Agent: {selected_agent}\n"
         f"Summary: {summary}\n"
         f"Description:\n{description}\n\n"
         f"Definition of Done:\n{dod_text}\n\n"
@@ -573,7 +681,7 @@ def run_orchestration(
         "to validate the implemented behavior. Run the relevant test commands, then "
         "summarize changed files, test outcomes, and any follow-up risks."
     )
-    output = _run_copilot_prompt(full_prompt, cwd=repo_path, env=env)
+    output = _run_copilot_prompt(full_prompt, cwd=repo_path, env=env, agent_name=selected_agent)
     session_id = _extract_copilot_session_id(output)
     if session_id:
         copilot_session_ids.append(session_id)
@@ -609,6 +717,10 @@ def run_orchestration(
         "",
         "## Implementation Plan",
         plan_text,
+        "",
+        "## Selected Copilot Agent",
+        f"- **Agent:** {selected_agent}",
+        f"- **Selection Reason:** {selected_agent_reason}",
         "",
         "## Copilot Suggestions",
         *suggestion_lines,
@@ -649,8 +761,14 @@ def run_orchestration(
         _emit_progress(progress_callback, "commit_changes", "success", commit_message)
         steps.append(StepResult(name="commit_changes", status="success", details=commit_message))
     else:
-        _emit_progress(progress_callback, "commit_changes", "skipped", "No file changes to commit")
-        steps.append(StepResult(name="commit_changes", status="skipped", details="No file changes to commit"))
+        commits_ahead = _count_commits_ahead(repo_path, env, base_branch)
+        if commits_ahead > 0:
+            details = f"Branch already has {commits_ahead} commit(s) ahead of {base_branch}"
+            _emit_progress(progress_callback, "commit_changes", "success", details)
+            steps.append(StepResult(name="commit_changes", status="success", details=details))
+        else:
+            _emit_progress(progress_callback, "commit_changes", "skipped", "No file changes to commit")
+            steps.append(StepResult(name="commit_changes", status="skipped", details="No file changes to commit"))
 
     _emit_progress(progress_callback, "push_branch", "running")
     _run(
@@ -721,6 +839,7 @@ def run_orchestration(
         "branch_name": branch_name,
         "pull_request_url": pr_url,
         "steps": [s.__dict__ for s in steps],
+        "selected_agent": selected_agent,
         "copilot_notes": copilot_notes,
         "artifacts": note_artifacts,
         "usage": usage,
