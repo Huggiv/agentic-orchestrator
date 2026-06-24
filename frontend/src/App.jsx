@@ -1,19 +1,8 @@
 import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import FlowDiagram, { StageIcon } from './FlowDiagram'
 import ExecutingJobs from './ExecutingJobs'
-
-const FLOW_STEPS = [
-  { key: 'clone_repository', label: 'Clone Repo' },
-  { key: 'auth_setup', label: 'Auth Setup' },
-  { key: 'prepare_branch', label: 'Prepare Branch' },
-  { key: 'read_jira', label: 'Read Jira' },
-  { key: 'agentic_implementation', label: 'Agentic Impl' },
-  { key: 'commit_changes', label: 'Commit Changes' },
-  { key: 'push_branch', label: 'Push Branch' },
-  { key: 'create_pr', label: 'Create PR' },
-]
+import JobFlowSteps, { computeFlowProgress } from './JobFlowSteps'
 
 const defaultPlan = [
   'Analyze impacted files',
@@ -29,66 +18,6 @@ const JOB_STATUS_LABELS = {
   failed: 'Failed',
 }
 
-const STEP_ALIASES = {
-  create_and_checkout_branch: 'prepare_branch',
-  read_jira_issue: 'read_jira',
-  copilot_agentic_plan: 'agentic_implementation',
-}
-
-const STEP_STATUS_LABELS = {
-  success: 'Done',
-  skipped: 'Skipped',
-  failed: 'Failed',
-  running: 'Running',
-  queued: 'Queued',
-  idle: 'Idle',
-}
-
-const normalizeStepKey = (value) => STEP_ALIASES[value] || value
-
-const collectHistoryStepStatus = (entry) => {
-  const statusMap = {}
-  ;(entry.progress || []).forEach((item) => {
-    statusMap[normalizeStepKey(item.name)] = item.status || 'idle'
-  })
-  ;(entry.result?.steps || []).forEach((item) => {
-    statusMap[normalizeStepKey(item.name)] = item.status || statusMap[normalizeStepKey(item.name)] || 'idle'
-  })
-  return statusMap
-}
-
-const computeFlowProgress = (entry) => {
-  const statuses = collectHistoryStepStatus(entry)
-  const done = FLOW_STEPS.filter((step) => {
-    const status = statuses[step.key]
-    return status === 'success' || status === 'skipped'
-  }).length
-  return { done, total: FLOW_STEPS.length }
-}
-
-function HistoryStepDiagram({ entry }) {
-  const statuses = collectHistoryStepStatus(entry)
-
-  return (
-    <div className="history-step-diagram" aria-label="Job flow steps">
-      {FLOW_STEPS.map((step) => {
-        const status = statuses[step.key] || 'idle'
-        return (
-          <div key={`${entry.id}-${step.key}`} className={`history-step history-step-${status}`}>
-            <svg width="26" height="26" viewBox="0 0 28 28" role="img" aria-label={step.label}>
-              <circle cx="14" cy="14" r="12" className="history-step-ring" />
-              <g transform="translate(0,0)">
-                <StageIcon stepKey={step.key} color="currentColor" />
-              </g>
-            </svg>
-            <span className="history-step-label">{step.label}</span>
-            <span className="history-step-status">{STEP_STATUS_LABELS[status] || status}</span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
 
 const parseApiPayload = (raw) => {
   if (!raw) return {}
@@ -148,6 +77,25 @@ const formatDurationHms = (seconds) => {
   return `${String(hrs).padStart(2, '0')} hr ${String(mins).padStart(2, '0')} mins ${String(secs).padStart(2, '0')} secs`
 }
 
+const formatDurationCompact = (seconds) => {
+  if (seconds === null || seconds === undefined) return '-'
+  const total = Math.max(0, Math.round(Number(seconds)))
+  if (Number.isNaN(total)) return '-'
+
+  if (total >= 3600) {
+    const hrs = Math.floor(total / 3600)
+    const mins = Math.floor((total % 3600) / 60)
+    const secs = total % 60
+    return `${hrs} hr ${mins} mins ${secs} secs`
+  }
+  if (total >= 60) {
+    const mins = Math.floor(total / 60)
+    const secs = total % 60
+    return `${mins} mins ${secs} secs`
+  }
+  return `${total} sec`
+}
+
 const CollapsiblePanel = ({
   id,
   title,
@@ -170,6 +118,8 @@ const CollapsiblePanel = ({
 
 export default function App() {
   const [ticket, setTicket] = useState('')
+  const [availableAgents, setAvailableAgents] = useState(['SWE'])
+  const [selectedAgent, setSelectedAgent] = useState('SWE')
   const [repository, setRepository] = useState('vittal-huggi_ADVNTST/v93000_telemetry_station')
   const [reviewer, setReviewer] = useState('')
   const [result, setResult] = useState(null)
@@ -190,11 +140,40 @@ export default function App() {
     if (!response.ok) {
       throw new Error(data.detail || 'Failed to fetch orchestration history')
     }
-    setHistory(Array.isArray(data.items) ? data.items : [])
+    const items = Array.isArray(data.items) ? data.items : []
+    setHistory(items)
+    setRunningJobs(
+      items
+        .filter((entry) => entry.status === 'queued' || entry.status === 'running')
+        .map((entry) => ({
+          id: entry.id,
+          jira_ticket_id: entry.request?.jira_ticket_id || '-',
+          repository: entry.request?.repository || '-',
+          selected_agent: entry.request?.selected_agent || 'SWE',
+        }))
+    )
+  }
+
+  const loadAgents = async () => {
+    const response = await fetch('/api/agents')
+    const raw = await response.text()
+    const data = parseApiPayload(raw)
+    if (!response.ok) {
+      throw new Error(data.detail || 'Failed to fetch available agents')
+    }
+
+    const items = Array.isArray(data.items) ? data.items.filter((item) => typeof item === 'string' && item) : []
+    const nextAgents = items.length > 0 ? items : ['SWE']
+    setAvailableAgents(nextAgents)
+    setSelectedAgent((prev) => (nextAgents.includes(prev) ? prev : nextAgents[0]))
   }
 
   useEffect(() => {
     loadHistory().catch((err) => setError(err.message))
+    loadAgents().catch(() => {
+      setAvailableAgents(['SWE'])
+      setSelectedAgent('SWE')
+    })
   }, [])
 
   useEffect(() => {
@@ -216,9 +195,7 @@ export default function App() {
   }
 
   const handleJobComplete = (jobId) => {
-    // Remove job from running list
     setRunningJobs((prev) => prev.filter((job) => job.id !== jobId))
-    // Reload history to show completed job
     loadHistory().catch(() => undefined)
   }
 
@@ -235,6 +212,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jira_ticket_id: ticket,
+          selected_agent: selectedAgent,
           repository,
           base_branch: 'development',
           reviewer: reviewer || null,
@@ -255,6 +233,7 @@ export default function App() {
         id: jobId,
         jira_ticket_id: ticket,
         repository,
+        selected_agent: selectedAgent,
       }
       setRunningJobs((prev) => [...prev, newJob])
       setActiveTab('executing')
@@ -269,12 +248,6 @@ export default function App() {
   }
 
   const isRunning = jobStatus === 'queued' || jobStatus === 'running'
-  const showFlow = isRunning || progress.length > 0 || jobStatus === 'success' || jobStatus === 'failed'
-  const completedSteps = progress.filter((event) => event.status === 'success' || event.status === 'skipped').length
-  const latestProgress = progress.length > 0 ? progress[progress.length - 1] : null
-  const copilotAuthSource = progress
-    .filter((event) => event.name === 'auth_setup' && event.status === 'success')
-    .at(-1)?.details
 
   const buildJiraLink = (entry) => {
     const ticketId = entry.request?.jira_ticket_id
@@ -412,6 +385,15 @@ export default function App() {
                 </label>
 
                 <label>
+                  Agent
+                  <select value={selectedAgent} onChange={(e) => setSelectedAgent(e.target.value)}>
+                    {availableAgents.map((agent) => (
+                      <option key={agent} value={agent}>{agent}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
                   Reviewer (GitHub username)
                   <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="teammate-name" />
                 </label>
@@ -426,8 +408,6 @@ export default function App() {
                 </button>
               </form>
             </CollapsiblePanel>
-
-            {showFlow && <FlowDiagram steps={FLOW_STEPS} progress={progress} jobStatus={jobStatus} />}
 
             {error && <section className="panel error">{error}</section>}
 
@@ -510,72 +490,112 @@ export default function App() {
             <div className="history-list">
               {filteredHistory.map((entry) => (
                 <div key={entry.id} className={`history-entry history-${entry.status}`}>
-                  {(() => {
-                    const flow = computeFlowProgress(entry)
-                    return (
-                      <div className="history-flow-metric">
-                        <span className="history-flow-label">Flow Progress</span>
-                        <strong>{flow.done}/{flow.total}</strong>
-                      </div>
-                    )
-                  })()}
-                  <div className="history-header">
-                    <strong>
-                      {buildJiraLink(entry) ? (
-                        <a href={buildJiraLink(entry)} target="_blank" rel="noreferrer" className="ticket-link">
-                          {entry.request?.jira_ticket_id || '-'}
-                        </a>
-                      ) : (
-                        entry.request?.jira_ticket_id || '-'
-                      )}
-                    </strong>{' '}
-                    on <code>{entry.request?.repository || '-'}</code>
-                    <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
+                  <div className="history-top-row">
+                    {(() => {
+                      const flow = computeFlowProgress(entry)
+                      return (
+                        <div className="history-flow-metric">
+                          <span className="history-flow-label">Flow Progress</span>
+                          <strong>{flow.done}/{flow.total}</strong>
+                        </div>
+                      )
+                    })()}
+                    <div className="history-trigger-time">
+                      Triggered: {new Date(entry.created_at).toLocaleString()}
+                    </div>
                   </div>
-                  <div className="history-meta">
-                    <small>{new Date(entry.finished_at || entry.created_at).toLocaleString()}</small>
+                  <div className="history-header">
+                    <div className="history-header-main">
+                      <strong>
+                        {buildJiraLink(entry) ? (
+                          <a href={buildJiraLink(entry)} target="_blank" rel="noreferrer" className="ticket-link">
+                            {entry.request?.jira_ticket_id || '-'}
+                          </a>
+                        ) : (
+                          entry.request?.jira_ticket_id || '-'
+                        )}
+                      </strong>{' '}
+                      on <code>{entry.request?.repository || '-'}</code>
+                      {entry.result?.pull_request_url && (
+                        <a href={entry.result.pull_request_url} target="_blank" rel="noreferrer" className="history-pr-link">
+                          View PR
+                        </a>
+                      )}
+                    </div>
+                    <div className="history-header-right">
+                      <span className="history-duration-pill">
+                        Duration: {formatDurationCompact(entry.result?.usage?.ai?.duration_seconds)}
+                      </span>
+                      <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
+                    </div>
                   </div>
                   {entry.error && <div className="history-error">{entry.error}</div>}
                   {entry.result && (
                     <div className="history-result">
-                      <a href={entry.result.pull_request_url} target="_blank" rel="noreferrer">
-                        View PR
-                      </a>
                       {entry.result.usage && (
-                        <div className="history-credits">
-                          Changes +{formatInt(entry.result.usage?.changes?.added)} -{formatInt(entry.result.usage?.changes?.removed)}
-                          {' '}| Ai Creds {formatCredits(normalizeCredits(entry.result.usage))}
-                          {' '}| Tokens [Total {formatTokenCompact(entry.result.usage?.tokens?.total)} ({formatTokenCompact(entry.result.usage?.tokens?.input)} In, {formatTokenCompact(entry.result.usage?.tokens?.output)} Out, {formatTokenCompact(entry.result.usage?.tokens?.cached)} cached)]
-                          {' '}| Duration {formatDurationHms(entry.result.usage?.ai?.duration_seconds)}
-                          {' '}| Cost ${formatCost(entry.result.usage.estimated_cost_usd)}
-                          {entry.result.usage?.session_ids?.length > 0 && (
-                            <>
-                              {' '}| Session {entry.result.usage.session_ids.join(', ')}
-                            </>
-                          )}
-                        </div>
+                        <details className="history-collapsible" open={entry.status === 'running' || entry.status === 'queued'}>
+                          <summary>Changes and Usage</summary>
+                          <div className="history-credits">
+                            <table className="history-credits-table">
+                              <tbody>
+                                <tr className="history-credits-highlight">
+                                  <th scope="row">Changes</th>
+                                  <td>+{formatInt(entry.result.usage?.changes?.added)} / -{formatInt(entry.result.usage?.changes?.removed)}</td>
+                                </tr>
+                                <tr className="history-credits-highlight">
+                                  <th scope="row">Cost</th>
+                                  <td>${formatCost(entry.result.usage.estimated_cost_usd)}</td>
+                                </tr>
+                                <tr>
+                                  <th scope="row">AI Credits</th>
+                                  <td>{formatCredits(normalizeCredits(entry.result.usage))}</td>
+                                </tr>
+                                <tr>
+                                  <th scope="row">Tokens</th>
+                                  <td>
+                                    Total {formatTokenCompact(entry.result.usage?.tokens?.total)}
+                                    {' '}({formatTokenCompact(entry.result.usage?.tokens?.input)} In, {formatTokenCompact(entry.result.usage?.tokens?.output)} Out, {formatTokenCompact(entry.result.usage?.tokens?.cached)} cached)
+                                  </td>
+                                </tr>
+                                <tr>
+                                  <th scope="row">Duration</th>
+                                  <td>{formatDurationHms(entry.result.usage?.ai?.duration_seconds)}</td>
+                                </tr>
+                                {entry.result.usage?.session_ids?.length > 0 && (
+                                  <tr>
+                                    <th scope="row">Session</th>
+                                    <td>{entry.result.usage.session_ids.join(', ')}</td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </details>
                       )}
 
                       {entry.result.artifacts?.length > 0 && (
-                        <div className="history-artifacts">
-                          {entry.result.artifacts.map((artifact) => (
-                            <button
-                              type="button"
-                              className="artifact-link"
-                              key={artifact.path}
-                              onClick={() => setSelectedArtifact(artifact)}
-                            >
-                              {artifact.path}
-                            </button>
-                          ))}
-                        </div>
+                        <details className="history-collapsible">
+                          <summary>Artifacts</summary>
+                          <div className="history-artifacts">
+                            {entry.result.artifacts.map((artifact) => (
+                              <button
+                                type="button"
+                                className="artifact-link"
+                                key={artifact.path}
+                                onClick={() => setSelectedArtifact(artifact)}
+                              >
+                                {artifact.path}
+                              </button>
+                            ))}
+                          </div>
+                        </details>
                       )}
                     </div>
                   )}
 
                   <details className="history-collapsible history-logs" open={entry.status === 'running' || entry.status === 'queued'}>
                     <summary>Flow Diagram Steps</summary>
-                    <HistoryStepDiagram entry={entry} />
+                    <JobFlowSteps idPrefix={entry.id} entry={entry} />
                   </details>
 
                   {(entry.status === 'running' || entry.status === 'queued' || entry.progress?.length > 0) && (

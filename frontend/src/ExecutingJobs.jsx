@@ -1,16 +1,5 @@
 import { useEffect, useState } from 'react'
-import FlowDiagram, { StageIcon } from './FlowDiagram'
-
-const FLOW_STEPS = [
-  { key: 'clone_repository', label: 'Clone Repo' },
-  { key: 'auth_setup', label: 'Auth Setup' },
-  { key: 'prepare_branch', label: 'Prepare Branch' },
-  { key: 'read_jira', label: 'Read Jira' },
-  { key: 'agentic_implementation', label: 'Agentic Impl' },
-  { key: 'commit_changes', label: 'Commit Changes' },
-  { key: 'push_branch', label: 'Push Branch' },
-  { key: 'create_pr', label: 'Create PR' },
-]
+import JobFlowSteps from './JobFlowSteps'
 
 const parseApiPayload = (raw) => {
   if (!raw) return {}
@@ -25,40 +14,82 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
   const [jobDetails, setJobDetails] = useState({})
 
   useEffect(() => {
-    if (!Array.isArray(runningJobs) || runningJobs.length === 0) return
+    if (!Array.isArray(runningJobs) || runningJobs.length === 0) {
+      return undefined
+    }
 
-    const interval = setInterval(async () => {
-      for (const job of runningJobs) {
-        if (!jobDetails[job.id]) {
-          setJobDetails((prev) => ({ ...prev, [job.id]: { status: 'queued', progress: [] } }))
-        }
+    let active = true
 
-        const statusResponse = await fetch(`/api/orchestrate/${job.id}`)
-        const statusRaw = await statusResponse.text()
-        const statusData = parseApiPayload(statusRaw)
+    const poll = async () => {
+      await Promise.all(
+        runningJobs.map(async (job) => {
+          try {
+            const statusResponse = await fetch(`/api/orchestrate/${job.id}`)
+            const statusRaw = await statusResponse.text()
+            const statusData = parseApiPayload(statusRaw)
 
-        if (statusResponse.ok) {
-          setJobDetails((prev) => ({
-            ...prev,
-            [job.id]: {
-              status: statusData.status,
-              progress: statusData.progress || [],
-              error: statusData.error,
-              result: statusData.result,
-            },
-          }))
+            if (!active) return
 
-          if (statusData.status === 'success' || statusData.status === 'failed') {
-            if (onJobComplete) {
-              onJobComplete(job.id)
+            if (statusResponse.ok) {
+              setJobDetails((prev) => ({
+                ...prev,
+                [job.id]: {
+                  status: statusData.status,
+                  progress: statusData.progress || [],
+                  error: statusData.error,
+                  result: statusData.result,
+                },
+              }))
+
+              if ((statusData.status === 'success' || statusData.status === 'failed') && onJobComplete) {
+                onJobComplete(job.id)
+              }
+              return
             }
-          }
-        }
-      }
-    }, 2000)
 
-    return () => clearInterval(interval)
-  }, [runningJobs, jobDetails, onJobComplete])
+            setJobDetails((prev) => ({
+              ...prev,
+              [job.id]: {
+                status: prev[job.id]?.status || 'running',
+                progress: prev[job.id]?.progress || [],
+                error: statusData.detail || 'Failed to fetch job status',
+                result: prev[job.id]?.result,
+              },
+            }))
+          } catch (error) {
+            if (!active) return
+            setJobDetails((prev) => ({
+              ...prev,
+              [job.id]: {
+                status: prev[job.id]?.status || 'running',
+                progress: prev[job.id]?.progress || [],
+                error: error?.message || 'Failed to fetch job status',
+                result: prev[job.id]?.result,
+              },
+            }))
+          }
+        })
+      )
+    }
+
+    setJobDetails((prev) => {
+      const next = { ...prev }
+      runningJobs.forEach((job) => {
+        if (!next[job.id]) {
+          next[job.id] = { status: 'queued', progress: [] }
+        }
+      })
+      return next
+    })
+
+    poll()
+    const interval = setInterval(poll, 2000)
+
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
+  }, [runningJobs, onJobComplete])
 
   if (runningJobs.length === 0) {
     return (
@@ -80,6 +111,9 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '0.95rem', color: '#1f4156' }}>
                 {job.jira_ticket_id} on {job.repository}
               </h3>
+              <p style={{ margin: '0 0 0.45rem 0', fontSize: '0.8rem', color: '#4e6c80' }}>
+                Agent: <strong>{job.selected_agent || 'SWE'}</strong>
+              </p>
               <div
                 style={{
                   display: 'inline-block',
@@ -102,7 +136,15 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               </div>
             )}
 
-            {progress.length > 0 && <FlowDiagram steps={FLOW_STEPS} progress={progress} jobStatus={details.status} />}
+            <JobFlowSteps
+              idPrefix={job.id}
+              entry={{
+                id: job.id,
+                status: details.status,
+                progress,
+                result: details.result,
+              }}
+            />
           </div>
         )
       })}
