@@ -547,6 +547,18 @@ def run_orchestration(
     repo_instruction_text = "\n\n".join(
         f"### {artifact['path']}\n{artifact['content']}" for artifact in repo_instructions
     )
+    
+    # Store Jira context for implementation.md
+    jira_context = {
+        "ticket_id": jira_ticket_id,
+        "summary": summary,
+        "description": description,
+        "dod_points": dod_points,
+        "type": issue.get("type", ""),
+        "status": issue.get("status", ""),
+        "priority": issue.get("priority", ""),
+    }
+    
     full_prompt = (
         f"Repository: {repo_slug}\n"
         f"Jira Ticket: {jira_ticket_id}\n"
@@ -574,20 +586,34 @@ def run_orchestration(
     notes_file = notes_dir / f"{jira_ticket_id.lower()}-implementation.md"
     dod_lines = [f"- {point}" for point in dod_points] or ["- Not explicitly provided"]
     suggestion_lines = [f"### Suggestion {idx + 1}\n{note}\n" for idx, note in enumerate(copilot_notes)]
-    notes_content = "\n".join(
-        [
-            f"# Agentic Implementation Notes for {jira_ticket_id}",
-            "",
-            f"Repository: {repo_slug}",
-            f"Summary: {summary}",
-            "",
-            "## DoD",
-            *dod_lines,
-            "",
-            "## Copilot Suggestions",
-            *suggestion_lines,
-        ]
-    )
+    
+    # Build rich notes with full Jira context
+    notes_sections = [
+        f"# Agentic Implementation Notes for {jira_ticket_id}",
+        "",
+        "## Jira Issue Details",
+        f"- **Ticket ID:** {jira_context['ticket_id']}",
+        f"- **Type:** {jira_context['type']}",
+        f"- **Status:** {jira_context['status']}",
+        f"- **Priority:** {jira_context['priority']}",
+        f"- **Summary:** {jira_context['summary']}",
+        "",
+        "## Description",
+        jira_context['description'] or "*No description provided*",
+        "",
+        "## Definition of Done (DoD)",
+        *dod_lines,
+        "",
+        "## Repository",
+        repo_slug,
+        "",
+        "## Implementation Plan",
+        plan_text,
+        "",
+        "## Copilot Suggestions",
+        *suggestion_lines,
+    ]
+    notes_content = "\n".join(notes_sections)
     notes_file.write_text(notes_content)
 
     note_artifacts = [

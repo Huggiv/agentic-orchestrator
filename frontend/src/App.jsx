@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import FlowDiagram, { StageIcon } from './FlowDiagram'
+import ExecutingJobs from './ExecutingJobs'
 
 const FLOW_STEPS = [
   { key: 'clone_repository', label: 'Clone Repo' },
@@ -176,9 +177,12 @@ export default function App() {
   const [progress, setProgress] = useState([])
   const [error, setError] = useState('')
   const [history, setHistory] = useState([])
+  const [runningJobs, setRunningJobs] = useState([])
   const [activeTab, setActiveTab] = useState('run')
   const [expandedPanels, setExpandedPanels] = useState({ trigger: true })
   const [selectedArtifact, setSelectedArtifact] = useState(null)
+  const [historyJiraFilter, setHistoryJiraFilter] = useState('')
+  const [historyRepoFilter, setHistoryRepoFilter] = useState('')
 
   const loadHistory = async () => {
     const response = await fetch('/api/orchestrate/history?limit=30&include_progress=true')
@@ -212,6 +216,13 @@ export default function App() {
     }))
   }
 
+  const handleJobComplete = (jobId) => {
+    // Remove job from running list
+    setRunningJobs((prev) => prev.filter((job) => job.id !== jobId))
+    // Reload history to show completed job
+    loadHistory().catch(() => undefined)
+  }
+
   const triggerOrchestration = async (event) => {
     event.preventDefault()
     setError('')
@@ -240,30 +251,18 @@ export default function App() {
       const jobId = data.job_id
       if (!jobId) throw new Error('Orchestration job id missing from backend response')
 
-      for (let i = 0; i < 180; i += 1) {
-        const statusResponse = await fetch(`/api/orchestrate/${jobId}`)
-        const statusRaw = await statusResponse.text()
-        const statusData = parseApiPayload(statusRaw)
-        if (!statusResponse.ok) throw new Error(statusData.detail || 'Failed to get orchestration status')
-
-        setJobStatus(statusData.status)
-        setProgress(statusData.progress || [])
-
-        if (statusData.status === 'success') {
-          setResult(statusData.result)
-          await loadHistory()
-          return
-        }
-
-        if (statusData.status === 'failed') {
-          await loadHistory()
-          throw new Error(statusData.error || 'Orchestration failed')
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 1200))
+      // Add job to running jobs list and switch to Executing Jobs tab
+      const newJob = {
+        id: jobId,
+        jira_ticket_id: ticket,
+        repository,
       }
-
-      throw new Error('Timed out waiting for orchestration completion')
+      setRunningJobs((prev) => [...prev, newJob])
+      setActiveTab('executing')
+      setJobStatus('running')
+      
+      // Clear form for next run
+      setTicket('')
     } catch (err) {
       setError(err.message)
       setJobStatus('failed')
@@ -284,6 +283,14 @@ export default function App() {
     if (!ticketId || !jiraBaseUrl) return null
     return `${jiraBaseUrl.replace(/\/$/, '')}/browse/${ticketId}`
   }
+
+  const filteredHistory = history.filter((entry) => {
+    const ticketId = (entry.request?.jira_ticket_id || '').toLowerCase()
+    const repo = (entry.request?.repository || '').toLowerCase()
+    const jiraMatch = ticketId.includes(historyJiraFilter.trim().toLowerCase())
+    const repoMatch = repo.includes(historyRepoFilter.trim().toLowerCase())
+    return jiraMatch && repoMatch
+  })
 
   const renderUsageSummary = (usage) => {
     if (!usage) return null
@@ -351,11 +358,13 @@ export default function App() {
   return (
     <div className="page">
       <div className="floating-header-shell">
-        <header className="hero">
+        <header className="hero hero-compact">
           <div className="hero-copy">
-            <span className="hero-eyebrow">Autonomous Delivery Control Plane</span>
-            <h1>Agentic Orchestration Console</h1>
-            <p>Drive Jira-scoped implementation, validation, and pull request creation through a Copilot-powered execution path.</p>
+            <div className="hero-branding">
+              <h1>AgentFlow</h1>
+            </div>
+            <span className="hero-eyebrow">Autonomous Orchestration Engine</span>
+            <p>Copilot-powered implementation and PR automation for Jira-scoped development.</p>
           </div>
           <div className="hero-metrics">
             <div className="hero-metric">
@@ -363,12 +372,12 @@ export default function App() {
               <span className="hero-metric-label">Current Run</span>
             </div>
             <div className="hero-metric">
-              <span className="hero-metric-value">{history.length}</span>
-              <span className="hero-metric-label">Stored Runs</span>
+              <span className="hero-metric-value">{runningJobs.length}</span>
+              <span className="hero-metric-label">Running</span>
             </div>
             <div className="hero-metric">
-              <span className="hero-metric-value">{completedSteps}/{FLOW_STEPS.length}</span>
-              <span className="hero-metric-label">Flow Progress</span>
+              <span className="hero-metric-value">{history.length}</span>
+              <span className="hero-metric-label">Stored Runs</span>
             </div>
           </div>
         </header>
@@ -376,6 +385,9 @@ export default function App() {
         <nav className="tabs-navigation">
           <button className={`tab-button${activeTab === 'run' ? ' active' : ''}`} onClick={() => setActiveTab('run')}>
             Run
+          </button>
+          <button className={`tab-button${activeTab === 'executing' ? ' active' : ''}`} onClick={() => setActiveTab('executing')}>
+            Executing Jobs {runningJobs.length > 0 && <span className="tab-badge">{runningJobs.length}</span>}
           </button>
           <button className={`tab-button${activeTab === 'history' ? ' active' : ''}`} onClick={() => setActiveTab('history')}>
             History {history.length > 0 && <span className="tab-badge">{history.length}</span>}
@@ -510,14 +522,42 @@ export default function App() {
         </div>
       )}
 
+      {activeTab === 'executing' && (
+        <section className="panel">
+          <ExecutingJobs runningJobs={runningJobs} onJobComplete={handleJobComplete} />
+        </section>
+      )}
+
       {activeTab === 'history' && (
         <section className="panel">
           <h2>Orchestration History</h2>
+
+          <div className="history-filters">
+            <label>
+              Jira Ticket
+              <input
+                value={historyJiraFilter}
+                onChange={(e) => setHistoryJiraFilter(e.target.value)}
+                placeholder="Filter by Jira ticket"
+              />
+            </label>
+            <label>
+              Repository
+              <input
+                value={historyRepoFilter}
+                onChange={(e) => setHistoryRepoFilter(e.target.value)}
+                placeholder="Filter by repository"
+              />
+            </label>
+          </div>
+
           {history.length === 0 ? (
             <p>No orchestration runs yet.</p>
+          ) : filteredHistory.length === 0 ? (
+            <p>No history entries match the applied filters.</p>
           ) : (
             <div className="history-list">
-              {history.map((entry) => (
+              {filteredHistory.map((entry) => (
                 <div key={entry.id} className={`history-entry history-${entry.status}`}>
                   {(() => {
                     const flow = computeFlowProgress(entry)
@@ -639,6 +679,7 @@ export default function App() {
           </div>
         </div>
       )}
+
     </div>
   )
 }

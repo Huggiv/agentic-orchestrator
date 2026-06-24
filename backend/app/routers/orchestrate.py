@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.history_store import get_history_store
 from app.orchestration import OrchestrationError, run_orchestration
+from app.jira import service as jira_service
 
 router = APIRouter(prefix="/api", tags=["orchestrate"])
 
@@ -68,6 +69,20 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
 def orchestrate(payload: OrchestrateRequest):
     job_id = str(uuid4())
     created_at = _now()
+    
+    # Fetch full Jira details
+    jira_details = {}
+    try:
+        issue = jira_service.get_issue(payload.jira_ticket_id)
+        jira_details = {
+            "jira_title": issue.get("summary", ""),
+            "jira_summary": issue.get("summary", ""),
+            "jira_description": issue.get("description", ""),
+            "jira_type": issue.get("type", ""),
+        }
+    except Exception:
+        pass
+    
     get_history_store().create_job(
         job_id=job_id,
         created_at=created_at,
@@ -79,6 +94,7 @@ def orchestrate(payload: OrchestrateRequest):
             "commit_message": payload.commit_message,
             "change_plan": payload.change_plan,
             "jira_url": os.environ.get("JIRA_URL"),
+            **jira_details,
         },
     )
 
