@@ -25,6 +25,7 @@ class OrchestrateRequest(BaseModel):
     base_branch: str = Field(default="development", min_length=1)
     reviewer: Optional[str] = None
     selected_agent: Optional[str] = None
+    selected_model: Optional[str] = None
     commit_message: str = Field(min_length=3)
     change_plan: list[str] = Field(default_factory=list)
 
@@ -87,6 +88,7 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             base_branch=payload.base_branch,
             reviewer=payload.reviewer,
             selected_agent=payload.selected_agent,
+            selected_model=payload.selected_model,
             commit_message=payload.commit_message,
             change_plan=payload.change_plan,
             progress_callback=progress_callback,
@@ -136,6 +138,7 @@ def orchestrate(payload: OrchestrateRequest):
             "base_branch": payload.base_branch,
             "reviewer": payload.reviewer,
             "selected_agent": payload.selected_agent,
+            "selected_model": payload.selected_model,
             "commit_message": payload.commit_message,
             "change_plan": payload.change_plan,
             "jira_url": os.environ.get("JIRA_URL"),

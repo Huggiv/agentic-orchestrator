@@ -257,25 +257,23 @@ def _select_copilot_agent(issue: dict, change_plan: list[str]) -> tuple[str, str
     return DEFAULT_COPILOT_AGENT, "Default agent for code implementation"
 
 
-def _run_copilot_prompt(prompt: str, cwd: str, env: dict[str, str], agent_name: str) -> str:
+def _run_copilot_prompt(prompt: str, cwd: str, env: dict[str, str], agent_name: str, model: str | None = None) -> str:
     """Run Copilot CLI in non-interactive mode with full tool permissions."""
+    cmd = [
+        "copilot",
+        "--agent",
+        agent_name,
+        "--allow-all-tools",
+        "--allow-all-paths",
+        "--allow-all-urls",
+        "--no-ask-user",
+        "--no-color",
+    ]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.extend(["-p", prompt])
     try:
-        return _run(
-            [
-                "copilot",
-                "--agent",
-                agent_name,
-                "--allow-all-tools",
-                "--allow-all-paths",
-                "--allow-all-urls",
-                "--no-ask-user",
-                "--no-color",
-                "-p",
-                prompt,
-            ],
-            cwd=cwd,
-            env=env,
-        )
+        return _run(cmd, cwd=cwd, env=env)
     except OrchestrationError as exc:
         detail = str(exc)
         auth_markers = (
@@ -538,6 +536,7 @@ def run_orchestration(
     commit_message: str,
     change_plan: list[str],
     selected_agent: str | None = None,
+    selected_model: str | None = None,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     env = _prepare_env()
@@ -681,7 +680,7 @@ def run_orchestration(
         "to validate the implemented behavior. Run the relevant test commands, then "
         "summarize changed files, test outcomes, and any follow-up risks."
     )
-    output = _run_copilot_prompt(full_prompt, cwd=repo_path, env=env, agent_name=selected_agent)
+    output = _run_copilot_prompt(full_prompt, cwd=repo_path, env=env, agent_name=selected_agent, model=selected_model)
     session_id = _extract_copilot_session_id(output)
     if session_id:
         copilot_session_ids.append(session_id)
