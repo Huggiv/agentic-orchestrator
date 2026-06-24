@@ -1,0 +1,28 @@
+@startuml
+skinparam shadowing true
+skinparam roundcorner 12
+left to right direction
+
+node "Developer Host" as Host {
+  node "Docker Compose" as Compose {
+    node "frontend container\nnode:20-alpine\nport 5175" as Frontend #dae8fc
+    node "backend container\npython:3.11-slim\nport 8015" as Backend #d5e8d4
+  }
+
+  folder "/home/vithuggi/otf-tmp-repos" as TmpRepos #fff2cc
+  folder "/home/vithuggi/otf-history" as HistoryDir #fff2cc
+  file ".env mounted to /app/.env" as EnvFile #f8cecc
+}
+
+cloud "On-Prem Jira" as Jira
+cloud "GitHub.com" as GitHub
+
+Frontend --> Backend : Vite proxy /api, /health
+Backend --> Jira : Jira REST API
+Backend --> GitHub : git + PR API + auth
+Backend --> TmpRepos : clone workspaces
+Backend --> HistoryDir : SQLite db file
+EnvFile --> Frontend
+EnvFile --> Backend
+
+@enduml

@@ -1,0 +1,34 @@
+@startuml
+skinparam shadowing true
+skinparam roundcorner 12
+skinparam componentStyle rectangle
+top to bottom direction
+
+skinparam rectangle {
+  BorderColor #666666
+}
+
+rectangle "UI Trigger\nPOST /api/orchestrate" as Input #dae8fc
+rectangle "Create Job + Start Thread\n(routers/orchestrate.py)" as Queue #dae8fc
+rectangle "Clone Repository\n+ Read .github instructions" as Clone #d5e8d4
+rectangle "Auth Setup\n(gh + copilot tokens)" as Auth #d5e8d4
+rectangle "Checkout Base Branch\n+ Create Feature Branch" as Branch #d5e8d4
+rectangle "Fetch Jira Issue\n+ Extract DoD" as Jira #d5e8d4
+rectangle "Run Copilot Prompt\n+ Save Notes Artifact" as Agentic #d5e8d4
+rectangle "Git Add/Commit/Push" as GitOps #d5e8d4
+rectangle "Create Pull Request\n+ Optional Reviewer" as PR #d5e8d4
+rectangle "Persist Status/Progress\nSQLite HistoryStore" as Persist #fff2cc
+rectangle "UI Poll\nGET /api/orchestrate/{job_id}\nGET /api/orchestrate/history" as Output #fff2cc
+
+Input --> Queue
+Queue --> Clone
+Clone --> Auth
+Auth --> Branch
+Branch --> Jira
+Jira --> Agentic
+Agentic --> GitOps
+GitOps --> PR
+PR --> Persist
+Persist --> Output
+
+@enduml

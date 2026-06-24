@@ -1,0 +1,54 @@
+@startuml
+skinparam shadowing true
+skinparam roundcorner 10
+skinparam componentStyle rectangle
+left to right direction
+
+skinparam packageStyle rectangle
+
+package "API Layer" #dae8fc {
+  [app.main\nFastAPI app] as Main
+  [routers/orchestrate.py\nOrchestration routes] as OrchestrateRouter
+  [routers/jira.py\nJira routes] as JiraRouter
+}
+
+package "Core Services" #d5e8d4 {
+  [orchestration.py\nrun_orchestration()] as OrchestrationSvc
+  [jira/service.py\nIssue formatting] as JiraSvc
+  [jira/filters.py\nField projection] as JiraFilters
+  [jira/client.py\nJIRA client factory] as JiraClient
+}
+
+package "Persistence" #fff2cc {
+  [history_store.py\nHistoryStore] as HistoryStore
+  database "SQLite\norchestration_jobs\norchestration_progress" as Sqlite
+}
+
+package "External Runtime" #f8cecc {
+  [gh CLI] as GhCli
+  [copilot CLI] as CopilotCli
+  [GitHub REST API] as GithubApi
+  [On-Prem Jira API] as JiraApi
+  [Git repository origin] as GitOrigin
+}
+
+Main --> OrchestrateRouter
+Main --> JiraRouter
+OrchestrateRouter --> HistoryStore
+OrchestrateRouter --> OrchestrationSvc
+JiraRouter --> JiraSvc
+
+OrchestrationSvc --> JiraSvc
+OrchestrationSvc --> HistoryStore : progress callback writes
+OrchestrationSvc --> GhCli
+OrchestrationSvc --> CopilotCli
+OrchestrationSvc --> GithubApi
+OrchestrationSvc --> GitOrigin
+
+JiraSvc --> JiraClient
+JiraSvc --> JiraFilters
+JiraClient --> JiraApi
+
+HistoryStore --> Sqlite
+
+@enduml

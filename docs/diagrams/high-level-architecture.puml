@@ -1,0 +1,39 @@
+@startuml
+skinparam shadowing true
+skinparam roundcorner 12
+skinparam componentStyle rectangle
+left to right direction
+
+skinparam rectangle {
+  BackgroundColor #dae8fc
+  BorderColor #6c8ebf
+}
+
+skinparam database {
+  BackgroundColor #fff2cc
+  BorderColor #d6b656
+}
+
+skinparam actor {
+  BackgroundColor #f5f5f5
+  BorderColor #666666
+}
+
+actor "Engineer" as Engineer
+rectangle "On-Prem Jira" as Jira #f8cecc
+rectangle "GitHub API" as GitHubApi #f8cecc
+database "SQLite History\n(OTF_HISTORY_DB_PATH)" as HistoryDb
+rectangle "Target GitHub Repo" as TargetRepo #ffe6cc
+rectangle "Copilot CLI" as Copilot #e1d5e7
+rectangle "OTF Agentic Orchestrator\n(FastAPI + React)" as Orchestrator #dae8fc
+
+Engineer --> Orchestrator : Use web UI\nand trigger automation
+Orchestrator --> Jira : REST issue fetch\n(JIRA_URL + PAT)
+Orchestrator --> TargetRepo : Clone, branch,\ncommit, push
+Orchestrator --> GitHubApi : Create pull request\nrequest reviewer
+Orchestrator --> Copilot : Headless prompt\nexecution
+Orchestrator --> HistoryDb : Persist runs,\nprogress, results
+Engineer --> Jira : Open ticket links
+Engineer --> GitHubApi : Review created PR
+
+@enduml
