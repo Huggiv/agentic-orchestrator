@@ -268,7 +268,7 @@ def get_history_store() -> HistoryStore:
     global _history_store
     with _history_store_lock:
         if _history_store is None:
-            db_path = os.environ.get("OTF_HISTORY_DB_PATH", "/tmp/otf-orch-history.db")
+            db_path = os.environ.get("AGENT_FLOW_HISTORY_DB_PATH", "/tmp/agent_flow-orch-history.db")
             _history_store = HistoryStore(db_path=db_path)
         return _history_store
 

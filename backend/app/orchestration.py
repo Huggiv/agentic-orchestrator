@@ -294,9 +294,9 @@ def _git_auth_header(token: str) -> str:
     return f"AUTHORIZATION: basic {encoded}"
 
 
-_REPO_BASE_DIR = Path(os.environ.get("OTF_REPO_BASE_DIR", "/tmp/otf-tmp-repos"))
-_NOTES_DIR_NAME = ".otf_agentic"
-_COMMIT_EXCLUDE_PATHS = [":(exclude).otf_agentic/**", ":(exclude).otf-agentic/**"]
+_REPO_BASE_DIR = Path(os.environ.get("AGENT_FLOW_REPO_BASE_DIR", "/tmp/agent_flow-tmp-repos"))
+_NOTES_DIR_NAME = ".agent_flow_agentic"
+_COMMIT_EXCLUDE_PATHS = [":(exclude).agent_flow_agentic/**", ":(exclude).agent_flow-agentic/**"]
 _REPO_INSTRUCTION_MAX_FILE_CHARS = 2_500
 _REPO_INSTRUCTION_MAX_TOTAL_CHARS = 12_000
 _NANO_AIU_PER_CREDIT = 1_000_000_000
@@ -550,7 +550,7 @@ def run_orchestration(
     copilot_session_ids: list[str] = []
     repo_instructions = []
 
-    run_id = f"otf-agentic-{uuid.uuid4().hex[:8]}"
+    run_id = f"agent_flow-agentic-{uuid.uuid4().hex[:8]}"
     _REPO_BASE_DIR.mkdir(parents=True, exist_ok=True)
     temp_dir = str(_REPO_BASE_DIR / run_id)
     os.makedirs(temp_dir, exist_ok=True)
@@ -755,8 +755,8 @@ def run_orchestration(
     )
     staged = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, env=env)
     if staged:
-        _run(["git", "config", "user.email", os.environ.get("GIT_AUTHOR_EMAIL", "otf-bot@example.com")], cwd=repo_path, env=env)
-        _run(["git", "config", "user.name", os.environ.get("GIT_AUTHOR_NAME", "OTF Agentic Bot")], cwd=repo_path, env=env)
+        _run(["git", "config", "user.email", os.environ.get("GIT_AUTHOR_EMAIL", "agent_flow-bot@example.com")], cwd=repo_path, env=env)
+        _run(["git", "config", "user.name", os.environ.get("GIT_AUTHOR_NAME", "AGENT_FLOW Agentic Bot")], cwd=repo_path, env=env)
         _run(["git", "commit", "-m", commit_message], cwd=repo_path, env=env)
         _emit_progress(progress_callback, "commit_changes", "success", commit_message)
         steps.append(StepResult(name="commit_changes", status="success", details=commit_message))

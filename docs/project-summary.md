@@ -1,5 +1,5 @@
 ---
-title: OTF Agentic Orchestrator - Project Summary
+title: AGENT_FLOW Agentic Orchestrator - Project Summary
 date: 2026-06-24
 version: 1.0
 audience: Engineering Team, Architects, Stakeholders
@@ -7,7 +7,7 @@ audience: Engineering Team, Architects, Stakeholders
 
 # 1. Executive Summary
 
-OTF Agentic Orchestrator is a two-container application that automates Jira-driven software delivery workflows. It combines a FastAPI backend with a React + Vite frontend to trigger, monitor, and persist end-to-end orchestration runs. A run fetches Jira context, clones a target repository, invokes Copilot CLI for agentic implementation guidance, creates commits/branches, and opens GitHub pull requests. The system persists run history and progress events in SQLite so users can inspect active and completed jobs. It is designed for on-prem Jira compatibility and headless operation using token-based authentication.
+AGENT_FLOW Agentic Orchestrator is a two-container application that automates Jira-driven software delivery workflows. It combines a FastAPI backend with a React + Vite frontend to trigger, monitor, and persist end-to-end orchestration runs. A run fetches Jira context, clones a target repository, invokes Copilot CLI for agentic implementation guidance, creates commits/branches, and opens GitHub pull requests. The system persists run history and progress events in SQLite so users can inspect active and completed jobs. It is designed for on-prem Jira compatibility and headless operation using token-based authentication.
 
 # 2. Architecture Overview
 
@@ -30,13 +30,13 @@ The system has one primary runtime boundary: the orchestrator stack (frontend + 
 
 1. UI submits `POST /api/orchestrate` with Jira ticket, target repository, branch, reviewer, commit message, and change plan.
 2. Backend allocates a `job_id`, persists a queued job in `HistoryStore`, and starts a background thread.
-3. Worker clones the repository to `OTF_REPO_BASE_DIR`, then scans `.github` instructions.
+3. Worker clones the repository to `AGENT_FLOW_REPO_BASE_DIR`, then scans `.github` instructions.
 4. Worker validates runtime/auth tooling (`gh`, `copilot`) and resolves Copilot token source.
 5. Worker checks out the requested base branch, fast-forwards, and creates feature branch.
 6. Worker fetches Jira issue details and extracts DoD bullet points from description text.
 7. Worker submits a single rich Copilot prompt with Jira context, implementation plan, and repository instructions.
-8. Worker writes an implementation artifact under `.otf_agentic/` and computes change statistics.
-9. Worker stages/commits changes (excluding `.otf_agentic/**`), pushes branch, and creates PR via GitHub API.
+8. Worker writes an implementation artifact under `.agent_flow_agentic/` and computes change statistics.
+9. Worker stages/commits changes (excluding `.agent_flow_agentic/**`), pushes branch, and creates PR via GitHub API.
 10. Worker stores final result payload (PR URL, steps, usage metrics), while UI polls status and history.
 
 # 4. Core Components
@@ -94,7 +94,7 @@ Each issue includes:
 
 | Field | Type | Notes |
 |---|---|---|
-| `key` | string | Jira issue key (for example `OTF-123`) |
+| `key` | string | Jira issue key (for example `AGENT_FLOW-123`) |
 | `url` | string | Direct Jira browse URL |
 | `summary` | string | If available via filter projection |
 | `description` | string | If included by filter projection |
@@ -163,8 +163,8 @@ Each issue includes:
 
 - Root `.env` is mounted into both containers at `/app/.env`.
 - Backend persistent mounts:
-  - `/home/vithuggi/otf-tmp-repos` -> `/tmp/otf-tmp-repos` (repo clones)
-  - `/home/vithuggi/otf-history` -> `/tmp/otf-history` (SQLite db)
+  - `/home/vithuggi/agent_flow-tmp-repos` -> `/tmp/agent_flow-tmp-repos` (repo clones)
+  - `/home/vithuggi/agent_flow-history` -> `/tmp/agent_flow-history` (SQLite db)
 - Frontend proxy target is configured using `VITE_PROXY_TARGET=http://backend:8015`.
 
 ## CI/CD and Automation
@@ -200,7 +200,7 @@ No CI workflow files were detected under `.github/workflows/` in the current rep
 
 - Do not run orchestration without `GITHUB_TOKEN`; backend fails fast if missing.
 - Prefer dedicated `COPILOT_GITHUB_TOKEN` with Copilot Requests permission for headless runs.
-- Keep `.otf_agentic/**` out of commits (`_COMMIT_EXCLUDE_PATHS`) to avoid committing generated notes.
+- Keep `.agent_flow_agentic/**` out of commits (`_COMMIT_EXCLUDE_PATHS`) to avoid committing generated notes.
 - Use normalized repo inputs (`owner/repo` or full GitHub clone URL only).
 
 ## Anti-Patterns

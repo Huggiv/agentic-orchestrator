@@ -8,7 +8,7 @@ def test_history_store_persists_job_and_progress(tmp_path):
 
     job_id = "job-123"
     request_payload = {
-        "jira_ticket_id": "OTF-101",
+        "jira_ticket_id": "AGENT_FLOW-101",
         "repository": "owner/repo",
         "base_branch": "development",
     }
@@ -29,12 +29,12 @@ def test_history_store_persists_job_and_progress(tmp_path):
             "timestamp": "2026-06-23T10:00:10+00:00",
             "name": "prepare_branch",
             "status": "success",
-            "details": "feature/otf-101",
+            "details": "feature/agent_flow-101",
         },
     )
 
     result_payload = {
-        "branch_name": "feature/otf-101",
+        "branch_name": "feature/agent_flow-101",
         "pull_request_url": "https://github.com/owner/repo/pull/1",
         "steps": [{"name": "prepare_branch", "status": "success"}],
     }
@@ -49,8 +49,8 @@ def test_history_store_persists_job_and_progress(tmp_path):
     job = store.get_job(job_id)
     assert job is not None
     assert job["status"] == "success"
-    assert job["request"]["jira_ticket_id"] == "OTF-101"
-    assert job["result"]["branch_name"] == "feature/otf-101"
+    assert job["request"]["jira_ticket_id"] == "AGENT_FLOW-101"
+    assert job["result"]["branch_name"] == "feature/agent_flow-101"
     assert len(job["progress"]) == 2
     assert job["progress"][0]["status"] == "running"
     assert job["progress"][1]["status"] == "success"
@@ -73,7 +73,7 @@ def test_history_store_purges_jobs_older_than_30_days(tmp_path):
     store.create_job(
         job_id="job-old",
         created_at=old_created_at,
-        request_payload={"jira_ticket_id": "OTF-OLD", "repository": "owner/repo", "base_branch": "development"},
+        request_payload={"jira_ticket_id": "AGENT_FLOW-OLD", "repository": "owner/repo", "base_branch": "development"},
     )
     store.append_progress(
         "job-old",
@@ -81,14 +81,14 @@ def test_history_store_purges_jobs_older_than_30_days(tmp_path):
             "timestamp": old_created_at,
             "name": "prepare_branch",
             "status": "success",
-            "details": "feature/otf-old",
+            "details": "feature/agent_flow-old",
         },
     )
 
     store.create_job(
         job_id="job-fresh",
         created_at=fresh_created_at,
-        request_payload={"jira_ticket_id": "OTF-NEW", "repository": "owner/repo", "base_branch": "development"},
+        request_payload={"jira_ticket_id": "AGENT_FLOW-NEW", "repository": "owner/repo", "base_branch": "development"},
     )
 
     # Retention is applied automatically on write operations.

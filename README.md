@@ -1,20 +1,29 @@
-# OTF Agentic Orchestrator
+# Agentic Orchestrator
 
-OTF Agentic Orchestrator automates Jira-driven implementation workflows using a FastAPI backend and a React (Vite) frontend.
+Agentic Orchestrator automates Jira-driven implementation workflows using a FastAPI backend and a React (Vite) frontend.
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Project Structure](#project-structure)
-4. [Prerequisites](#prerequisites)
-5. [Configuration](#configuration)
-6. [Run Locally](#run-locally)
-7. [Run with Docker Compose](#run-with-docker-compose)
-8. [API Reference](#api-reference)
-9. [Execution Flow](#execution-flow)
-10. [Operations and Troubleshooting](#operations-and-troubleshooting)
-11. [Additional Documentation](#additional-documentation)
+- [Agentic Orchestrator](#agentic-orchestrator)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+  - [Architecture](#architecture)
+  - [Project Structure](#project-structure)
+  - [Prerequisites](#prerequisites)
+  - [Configuration](#configuration)
+  - [Run Locally](#run-locally)
+    - [Backend](#backend)
+    - [Frontend](#frontend)
+  - [Run with Docker Compose](#run-with-docker-compose)
+    - [Compose v1](#compose-v1)
+    - [Compose v2](#compose-v2)
+  - [API Reference](#api-reference)
+    - [Health](#health)
+    - [Jira](#jira)
+    - [Orchestration](#orchestration)
+  - [Execution Flow](#execution-flow)
+  - [Operations and Troubleshooting](#operations-and-troubleshooting)
+  - [Additional Documentation](#additional-documentation)
 
 ## Overview
 
@@ -81,8 +90,8 @@ Core variables:
 | `JIRA_URL` | Yes | Jira base URL |
 | `JIRA_PAT` | Yes | Jira PAT for API access |
 | `JIRA_VERIFY_SSL` | No | Set `false` for self-signed on-prem certs |
-| `OTF_REPO_BASE_DIR` | No | Temp clone workspace path |
-| `OTF_HISTORY_DB_PATH` | No | SQLite db path for orchestration history |
+| `AGENT_FLOW_REPO_BASE_DIR` | No | Temp clone workspace path |
+| `AGENT_FLOW_HISTORY_DB_PATH` | No | SQLite db path for orchestration history |
 
 ## Run Locally
 
@@ -156,7 +165,7 @@ Runtime notes:
 Default JQL when `jql` is omitted:
 
 ```text
-project = "OTF" AND status != "DONE" ORDER BY updated DESC
+project = "AGENT_FLOW" AND status != "DONE" ORDER BY updated DESC
 ```
 
 ### Orchestration
@@ -198,7 +207,7 @@ Sample request:
 
 - Use a dedicated `COPILOT_GITHUB_TOKEN` for stable headless Copilot execution.
 - Backend falls back to `gh auth token` before reusing `GITHUB_TOKEN`.
-- History persistence uses SQLite (`OTF_HISTORY_DB_PATH`).
+- History persistence uses SQLite (`AGENT_FLOW_HISTORY_DB_PATH`).
 - If Docker Compose v2 is unavailable, use `docker-compose` commands.
 
 ## Additional Documentation

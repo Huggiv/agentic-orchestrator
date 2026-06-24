@@ -22,7 +22,7 @@ _load_environment()
 
 from app.routers import jira, orchestrate  # noqa: E402 — must import after dotenv
 
-app = FastAPI(title="OTF Orchestrator API", version="0.1.0")
+app = FastAPI(title="AGENT_FLOW Orchestrator API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

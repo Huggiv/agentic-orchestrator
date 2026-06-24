@@ -22,10 +22,10 @@ skinparam actor {
 actor "Engineer" as Engineer
 rectangle "On-Prem Jira" as Jira #f8cecc
 rectangle "GitHub API" as GitHubApi #f8cecc
-database "SQLite History\n(OTF_HISTORY_DB_PATH)" as HistoryDb
+database "SQLite History\n(AGENT_FLOW_HISTORY_DB_PATH)" as HistoryDb
 rectangle "Target GitHub Repo" as TargetRepo #ffe6cc
 rectangle "Copilot CLI" as Copilot #e1d5e7
-rectangle "OTF Agentic Orchestrator\n(FastAPI + React)" as Orchestrator #dae8fc
+rectangle "AGENT_FLOW Agentic Orchestrator\n(FastAPI + React)" as Orchestrator #dae8fc
 
 Engineer --> Orchestrator : Use web UI\nand trigger automation
 Orchestrator --> Jira : REST issue fetch\n(JIRA_URL + PAT)

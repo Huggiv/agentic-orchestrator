@@ -9,8 +9,8 @@ node "Developer Host" as Host {
     node "backend container\npython:3.11-slim\nport 8015" as Backend #d5e8d4
   }
 
-  folder "/home/vithuggi/otf-tmp-repos" as TmpRepos #fff2cc
-  folder "/home/vithuggi/otf-history" as HistoryDir #fff2cc
+  folder "/home/vithuggi/agent_flow-tmp-repos" as TmpRepos #fff2cc
+  folder "/home/vithuggi/agent_flow-history" as HistoryDir #fff2cc
   file ".env mounted to /app/.env" as EnvFile #f8cecc
 }
 

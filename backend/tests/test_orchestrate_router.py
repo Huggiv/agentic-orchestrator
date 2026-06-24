@@ -19,7 +19,7 @@ def _wait_for_status(client: TestClient, job_id: str, expected: str, timeout_sec
 
 
 def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
-    monkeypatch.setenv("OTF_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
     reset_history_store_for_tests()
 
     def fake_run_orchestration(
@@ -49,12 +49,12 @@ def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
         create_response = client.post(
             "/api/orchestrate",
             json={
-                "jira_ticket_id": "OTF-222",
+                "jira_ticket_id": "AGENT_FLOW-222",
                 "repository": "owner/repo",
                 "base_branch": "development",
                 "reviewer": None,
                 "selected_agent": "SWE",
-                "commit_message": "feat(otf-222): automated implementation",
+                "commit_message": "feat(agent_flow-222): automated implementation",
                 "change_plan": ["Implement", "Test"],
             },
         )
@@ -62,7 +62,7 @@ def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
         job_id = create_response.json()["job_id"]
 
         status_payload = _wait_for_status(client, job_id=job_id, expected="success")
-        assert status_payload["result"]["branch_name"] == "feature/otf-222"
+        assert status_payload["result"]["branch_name"] == "feature/agent_flow-222"
         assert len(status_payload["progress"]) == 2
 
         history_response = client.get("/api/orchestrate/history?limit=10")
@@ -70,7 +70,7 @@ def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
         items = history_response.json()["items"]
         assert len(items) == 1
         assert items[0]["id"] == job_id
-        assert items[0]["request"]["jira_ticket_id"] == "OTF-222"
+        assert items[0]["request"]["jira_ticket_id"] == "AGENT_FLOW-222"
         assert items[0]["request"]["selected_agent"] == "SWE"
         assert items[0]["result"]["pull_request_url"] == "https://github.com/owner/repo/pull/1"
 
