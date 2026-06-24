@@ -1,0 +1,21 @@
+# Active filter config for Jira field projection.
+default:
+  fields:
+    - summary
+    - description
+    - status.name
+    - issuetype.name
+    - priority.name
+    - assignee.displayName
+    - reporter.displayName
+    - labels
+    - created
+    - updated
+  rename:
+    issuetype.name: type
+    status.name: status
+    priority.name: priority
+    assignee.displayName: assignee_name
+    reporter.displayName: reporter_name
+
+projects: {}

@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-dotenv>=1.0
+jira>=3.8
+pyyaml>=6.0
+requests>=2.31
+pytest>=8.2
+httpx>=0.27
