@@ -181,8 +181,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('run')
   const [expandedPanels, setExpandedPanels] = useState({ trigger: true })
   const [selectedArtifact, setSelectedArtifact] = useState(null)
-  const [historyJiraFilter, setHistoryJiraFilter] = useState('')
-  const [historyRepoFilter, setHistoryRepoFilter] = useState('')
+  const [historySearchFilter, setHistorySearchFilter] = useState('')
 
   const loadHistory = async () => {
     const response = await fetch('/api/orchestrate/history?limit=30&include_progress=true')
@@ -287,9 +286,9 @@ export default function App() {
   const filteredHistory = history.filter((entry) => {
     const ticketId = (entry.request?.jira_ticket_id || '').toLowerCase()
     const repo = (entry.request?.repository || '').toLowerCase()
-    const jiraMatch = ticketId.includes(historyJiraFilter.trim().toLowerCase())
-    const repoMatch = repo.includes(historyRepoFilter.trim().toLowerCase())
-    return jiraMatch && repoMatch
+    const query = historySearchFilter.trim().toLowerCase()
+    if (!query) return true
+    return ticketId.includes(query) || repo.includes(query)
   })
 
   const renderUsageSummary = (usage) => {
@@ -357,46 +356,47 @@ export default function App() {
 
   return (
     <div className="page">
-      <div className="floating-header-shell">
-        <header className="hero hero-compact">
-          <div className="hero-copy">
-            <div className="hero-branding">
-              <h1>AgentFlow</h1>
-            </div>
-            <span className="hero-eyebrow">Autonomous Orchestration Engine</span>
-            <p>Copilot-powered implementation and PR automation for Jira-scoped development.</p>
-          </div>
-          <div className="hero-metrics">
-            <div className="hero-metric">
-              <span className="hero-metric-value">{JOB_STATUS_LABELS[jobStatus] || jobStatus}</span>
-              <span className="hero-metric-label">Current Run</span>
-            </div>
-            <div className="hero-metric">
-              <span className="hero-metric-value">{runningJobs.length}</span>
-              <span className="hero-metric-label">Running</span>
-            </div>
-            <div className="hero-metric">
-              <span className="hero-metric-value">{history.length}</span>
-              <span className="hero-metric-label">Stored Runs</span>
-            </div>
-          </div>
-        </header>
+      {/* RevGenAI-style fixed topnav */}
+      <header className="topnav">
+        <div className="topnav-logo">
+          <span className="topnav-rocket">⚡</span>
+          <span className="topnav-brand">AgentFlow</span>
+        </div>
 
-        <nav className="tabs-navigation">
-          <button className={`tab-button${activeTab === 'run' ? ' active' : ''}`} onClick={() => setActiveTab('run')}>
+        <nav className="topnav-tabs">
+          <button
+            className={`topnav-tab${activeTab === 'run' ? ' topnav-tab--active' : ''}`}
+            onClick={() => setActiveTab('run')}
+          >
             Run
           </button>
-          <button className={`tab-button${activeTab === 'executing' ? ' active' : ''}`} onClick={() => setActiveTab('executing')}>
-            Executing Jobs {runningJobs.length > 0 && <span className="tab-badge">{runningJobs.length}</span>}
+          <button
+            className={`topnav-tab${activeTab === 'executing' ? ' topnav-tab--active' : ''}`}
+            onClick={() => setActiveTab('executing')}
+          >
+            Executing
+            {runningJobs.length > 0 && <span className="topnav-badge">{runningJobs.length}</span>}
           </button>
-          <button className={`tab-button${activeTab === 'history' ? ' active' : ''}`} onClick={() => setActiveTab('history')}>
-            History {history.length > 0 && <span className="tab-badge">{history.length}</span>}
+          <button
+            className={`topnav-tab${activeTab === 'history' ? ' topnav-tab--active' : ''}`}
+            onClick={() => setActiveTab('history')}
+          >
+            History
+            {history.length > 0 && <span className="topnav-badge">{history.length}</span>}
           </button>
         </nav>
-      </div>
+
+        <div className="topnav-right">
+          <span className={`topnav-status topnav-status--${jobStatus}`}>
+            {JOB_STATUS_LABELS[jobStatus] || jobStatus}
+          </span>
+        </div>
+      </header>
+
+      <div className="page-body">
 
       {activeTab === 'run' && (
-        <div className="run-shell">
+        <div className="run-shell run-shell--single">
           <div className="run-main">
             <CollapsiblePanel
               id="trigger"
@@ -478,47 +478,6 @@ export default function App() {
               </section>
             )}
           </div>
-
-          <aside className="run-aside">
-            <section className="panel side-panel">
-              <div className="side-panel-header">
-                <h2>Execution Pulse</h2>
-                <span className={`status-badge status-${jobStatus === 'success' ? 'success' : jobStatus === 'failed' ? 'failed' : 'queued'}`}>
-                  {JOB_STATUS_LABELS[jobStatus] || jobStatus}
-                </span>
-              </div>
-              <div className="quick-stats">
-                <div className="quick-stat-card">
-                  <span className="quick-stat-value">{completedSteps}</span>
-                  <span className="quick-stat-label">Completed Stages</span>
-                </div>
-                <div className="quick-stat-card">
-                  <span className="quick-stat-value">{history.length}</span>
-                  <span className="quick-stat-label">Persisted Runs</span>
-                </div>
-              </div>
-              <div className="status-detail-list">
-                <div>
-                  <span className="status-detail-label">Current Repository</span>
-                  <strong>{repository}</strong>
-                </div>
-                <div>
-                  <span className="status-detail-label">Latest Stage</span>
-                  <strong>{latestProgress?.name || 'awaiting_trigger'}</strong>
-                </div>
-                <div>
-                  <span className="status-detail-label">Copilot Auth Source</span>
-                  <strong>{copilotAuthSource || 'not checked yet'}</strong>
-                </div>
-              </div>
-            </section>
-
-            <section className="panel side-panel auth-guidance-panel">
-              <h2>Copilot Auth Guidance</h2>
-              <p>Headless runs should use a dedicated <strong>COPILOT_GITHUB_TOKEN</strong> with the <strong>Copilot Requests</strong> permission enabled.</p>
-              <p>If that variable is absent, the backend now falls back to the OAuth token from <strong>gh auth token</strong> before using <strong>GITHUB_TOKEN</strong>.</p>
-            </section>
-          </aside>
         </div>
       )}
 
@@ -534,19 +493,11 @@ export default function App() {
 
           <div className="history-filters">
             <label>
-              Jira Ticket
+              Search
               <input
-                value={historyJiraFilter}
-                onChange={(e) => setHistoryJiraFilter(e.target.value)}
-                placeholder="Filter by Jira ticket"
-              />
-            </label>
-            <label>
-              Repository
-              <input
-                value={historyRepoFilter}
-                onChange={(e) => setHistoryRepoFilter(e.target.value)}
-                placeholder="Filter by repository"
+                value={historySearchFilter}
+                onChange={(e) => setHistorySearchFilter(e.target.value)}
+                placeholder="Search by Jira ticket or repository"
               />
             </label>
           </div>
@@ -593,11 +544,8 @@ export default function App() {
                       {entry.result.usage && (
                         <div className="history-credits">
                           Changes +{formatInt(entry.result.usage?.changes?.added)} -{formatInt(entry.result.usage?.changes?.removed)}
-                          {' '}| Credits {formatCredits(normalizeCredits(entry.result.usage))}
-                          {' '}| Tokens In {formatTokenCompact(entry.result.usage?.tokens?.input)}
-                          {' '}| Tokens Out {formatTokenCompact(entry.result.usage?.tokens?.output)}
-                          {' '}| Tokens Cached {formatTokenCompact(entry.result.usage?.tokens?.cached)}
-                          {' '}| Tokens Total {formatTokenCompact(entry.result.usage?.tokens?.total)}
+                          {' '}| Ai Creds {formatCredits(normalizeCredits(entry.result.usage))}
+                          {' '}| Tokens [Total {formatTokenCompact(entry.result.usage?.tokens?.total)} ({formatTokenCompact(entry.result.usage?.tokens?.input)} In, {formatTokenCompact(entry.result.usage?.tokens?.output)} Out, {formatTokenCompact(entry.result.usage?.tokens?.cached)} cached)]
                           {' '}| Duration {formatDurationHms(entry.result.usage?.ai?.duration_seconds)}
                           {' '}| Cost ${formatCost(entry.result.usage.estimated_cost_usd)}
                           {entry.result.usage?.session_ids?.length > 0 && (
@@ -625,20 +573,6 @@ export default function App() {
                     </div>
                   )}
 
-                  {entry.result?.steps?.length > 0 && (
-                    <details className="history-collapsible">
-                      <summary>Steps</summary>
-                      <ul>
-                        {entry.result.steps.map((step) => (
-                          <li key={`${entry.id}-${step.name}-${step.status}`}>
-                            <strong>{step.name}</strong> - {step.status}
-                            {step.details ? ` (${step.details})` : ''}
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
-
                   <details className="history-collapsible history-logs" open={entry.status === 'running' || entry.status === 'queued'}>
                     <summary>Flow Diagram Steps</summary>
                     <HistoryStepDiagram entry={entry} />
@@ -664,6 +598,9 @@ export default function App() {
         </section>
       )}
 
+      </div>
+
+      {/* Artifact modal (outside page-body so it overlays everything) */}
       {selectedArtifact && (
         <div className="artifact-modal-backdrop" onClick={() => setSelectedArtifact(null)}>
           <div className="artifact-modal" onClick={(event) => event.stopPropagation()}>
@@ -680,6 +617,12 @@ export default function App() {
         </div>
       )}
 
+      {/* Footer */}
+      <footer className="app-footer">
+        <span className="app-footer-brand">⚡ AgentFlow</span>
+        <span className="app-footer-version">v1.0.0 &nbsp;·&nbsp; FastAPI + React 19</span>
+        <span className="app-footer-copy">© {new Date().getFullYear()} RevGenAI · All rights reserved</span>
+      </footer>
     </div>
   )
 }
