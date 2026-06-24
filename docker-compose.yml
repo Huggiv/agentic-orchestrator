@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: otf-backend
+    env_file:
+      - ./.env
+    environment:
+      - OTF_REPO_BASE_DIR=/tmp/otf-tmp-repos
+      - OTF_HISTORY_DB_PATH=/tmp/otf-history/orchestration.db
+      - COPILOT_GITHUB_TOKEN=${COPILOT_GITHUB_TOKEN:-}
+    ports:
+      - "8015:8015"
+    volumes:
+      - ./.env:/app/.env:ro
+      - /home/vithuggi/otf-tmp-repos:/tmp/otf-tmp-repos
+      - /home/vithuggi/otf-history:/tmp/otf-history
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: otf-frontend
+    ports:
+      - "5175:5175"
+    volumes:
+      - ./.env:/app/.env:ro
+    depends_on:
+      - backend
