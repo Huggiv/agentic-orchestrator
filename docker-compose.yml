@@ -9,12 +9,14 @@ services:
       - OTF_REPO_BASE_DIR=/tmp/otf-tmp-repos
       - OTF_HISTORY_DB_PATH=/tmp/otf-history/orchestration.db
       - COPILOT_GITHUB_TOKEN=${COPILOT_GITHUB_TOKEN:-}
+      - COPILOT_SESSION_STATE_DIR=/root/.copilot/session-state
     ports:
       - "8015:8015"
     volumes:
       - ./.env:/app/.env:ro
       - /home/vithuggi/otf-tmp-repos:/tmp/otf-tmp-repos
       - /home/vithuggi/otf-history:/tmp/otf-history
+      - /home/vithuggi/.copilot/agentic-orch:/root/.copilot/session-state
 
   frontend:
     build:

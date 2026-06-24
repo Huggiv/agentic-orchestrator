@@ -678,6 +678,9 @@ button:hover {
 .history-credits {
   font-size: 0.8rem;
   color: #6c757d;
+  margin-top: 0.35rem;
+  line-height: 1.55;
+  word-break: break-word;
 }
 
 .history-artifacts {

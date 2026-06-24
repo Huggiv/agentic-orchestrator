@@ -103,14 +103,48 @@ const formatInt = (value) => {
   return new Intl.NumberFormat().format(Number(value))
 }
 
+const normalizeCredits = (usage) => {
+  if (!usage) return null
+  if (usage.ai_credits_used !== null && usage.ai_credits_used !== undefined) {
+    return Number(usage.ai_credits_used)
+  }
+  if (usage.total_nano_aiu !== null && usage.total_nano_aiu !== undefined) {
+    return Number(usage.total_nano_aiu) / 1_000_000_000
+  }
+  return null
+}
+
 const formatCredits = (value) => {
   if (value === null || value === undefined) return '-'
-  return Number(value).toFixed(2)
+  return Number(value).toFixed(4)
 }
 
 const formatCost = (value) => {
   if (value === null || value === undefined) return '-'
   return Number(value).toFixed(4)
+}
+
+const formatTokenCompact = (value) => {
+  if (value === null || value === undefined) return '-'
+  const amount = Number(value)
+  if (Number.isNaN(amount)) return '-'
+
+  const abs = Math.abs(amount)
+  if (abs >= 1_000_000_000_000) return `${(amount / 1_000_000_000_000).toFixed(2)}T`
+  if (abs >= 1_000_000) return `${(amount / 1_000_000).toFixed(2)}M`
+  if (abs >= 1_000) return `${(amount / 1_000).toFixed(2)}K`
+  return `${Math.round(amount)}`
+}
+
+const formatDurationHms = (seconds) => {
+  if (seconds === null || seconds === undefined) return '-'
+  const total = Math.max(0, Math.round(Number(seconds)))
+  if (Number.isNaN(total)) return '-'
+
+  const hrs = Math.floor(total / 3600)
+  const mins = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  return `${String(hrs).padStart(2, '0')} hr ${String(mins).padStart(2, '0')} mins ${String(secs).padStart(2, '0')} secs`
 }
 
 const CollapsiblePanel = ({
@@ -257,6 +291,8 @@ export default function App() {
     const changes = usage.changes || {}
     const tokens = usage.tokens || {}
     const ai = usage.ai || {}
+    const sessionIds = Array.isArray(usage.session_ids) ? usage.session_ids : []
+    const aiCredits = normalizeCredits(usage)
 
     return (
       <div className="usage-summary">
@@ -270,11 +306,23 @@ export default function App() {
             <span className="usage-label">Lines Removed</span>
           </div>
           <div className="usage-card">
-            <span className="usage-value">{formatInt(tokens.total_tokens)}</span>
-            <span className="usage-label">Total Tokens</span>
+            <span className="usage-value">{formatTokenCompact(tokens.total)}</span>
+            <span className="usage-label">Tokens Total</span>
+          </div>
+          <div className="usage-card">
+            <span className="usage-value">{formatTokenCompact(tokens.input)}</span>
+            <span className="usage-label">Tokens Input</span>
+          </div>
+          <div className="usage-card">
+            <span className="usage-value">{formatTokenCompact(tokens.output)}</span>
+            <span className="usage-label">Tokens Output</span>
+          </div>
+          <div className="usage-card">
+            <span className="usage-value">{formatTokenCompact(tokens.cached)}</span>
+            <span className="usage-label">Tokens Cached</span>
           </div>
           <div className="usage-card usage-card--cost">
-            <span className="usage-value">{formatCredits(usage.ai_credits_used)}</span>
+            <span className="usage-value">{formatCredits(aiCredits)}</span>
             <span className="usage-label">AI Credits</span>
           </div>
           <div className="usage-card usage-card--rate">
@@ -283,11 +331,19 @@ export default function App() {
           </div>
         </div>
         <p>
-          Runtime: <strong>{ai.elapsed_text || '-'}</strong>
+          Duration: <strong>{formatDurationHms(ai.duration_seconds)}</strong>
         </p>
         <p>
-          Throughput: <strong>{ai.tokens_per_second_text || '-'}</strong>
+          Session Source: <strong>{usage.source || '-'}</strong>
         </p>
+        <p>
+          Session Log Found: <strong>{usage.session_log_found ? 'Yes' : 'No'}</strong>
+        </p>
+        {sessionIds.length > 0 && (
+          <p>
+            Sessions: <strong>{sessionIds.join(', ')}</strong>
+          </p>
+        )}
       </div>
     )
   }
@@ -497,9 +553,18 @@ export default function App() {
                       {entry.result.usage && (
                         <div className="history-credits">
                           Changes +{formatInt(entry.result.usage?.changes?.added)} -{formatInt(entry.result.usage?.changes?.removed)}
-                          {' '}| Credits {formatCredits(entry.result.usage.ai_credits_used)}
-                          {entry.result.usage?.ai?.elapsed_text ? ` (${entry.result.usage.ai.elapsed_text})` : ''}
+                          {' '}| Credits {formatCredits(normalizeCredits(entry.result.usage))}
+                          {' '}| Tokens In {formatTokenCompact(entry.result.usage?.tokens?.input)}
+                          {' '}| Tokens Out {formatTokenCompact(entry.result.usage?.tokens?.output)}
+                          {' '}| Tokens Cached {formatTokenCompact(entry.result.usage?.tokens?.cached)}
+                          {' '}| Tokens Total {formatTokenCompact(entry.result.usage?.tokens?.total)}
+                          {' '}| Duration {formatDurationHms(entry.result.usage?.ai?.duration_seconds)}
                           {' '}| Cost ${formatCost(entry.result.usage.estimated_cost_usd)}
+                          {entry.result.usage?.session_ids?.length > 0 && (
+                            <>
+                              {' '}| Session {entry.result.usage.session_ids.join(', ')}
+                            </>
+                          )}
                         </div>
                       )}
 

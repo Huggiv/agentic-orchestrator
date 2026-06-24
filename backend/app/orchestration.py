@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import shlex
@@ -103,24 +104,6 @@ def _extract_dod_points(description: str) -> list[str]:
         elif points:
             break
     return points
-
-
-def _estimate_usage(ai_credits: int, output_chars: int) -> dict:
-    """Estimate AI credit usage.
-
-    Each Copilot CLI request counts as 1 AI credit.  We track request count in
-    ``ai_credits`` (passed as request count) and output volume in
-    ``output_chars`` just for informational purposes.  Cost formula:
-        1 AI Credit = 0.01 USD
-    """
-    ai_credits_used = ai_credits
-    usd_per_credit = 0.01
-    estimated_cost = ai_credits_used * usd_per_credit
-    return {
-        "ai_credits_used": ai_credits_used,
-        "output_chars": output_chars,
-        "estimated_cost_usd": round(estimated_cost, 4),
-    }
 
 
 def _emit_progress(
@@ -236,41 +219,10 @@ _NOTES_DIR_NAME = ".otf_agentic"
 _COMMIT_EXCLUDE_PATHS = [":(exclude).otf_agentic/**", ":(exclude).otf-agentic/**"]
 _REPO_INSTRUCTION_MAX_FILE_CHARS = 2_500
 _REPO_INSTRUCTION_MAX_TOTAL_CHARS = 12_000
-
-
-def _parse_scaled_number(raw: str | None) -> int | None:
-    if not raw:
-        return None
-    value = raw.strip().lower().replace(",", "")
-    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([km]?)", value)
-    if not match:
-        return None
-    number = float(match.group(1))
-    suffix = match.group(2)
-    multiplier = 1
-    if suffix == "k":
-        multiplier = 1_000
-    elif suffix == "m":
-        multiplier = 1_000_000
-    return int(round(number * multiplier))
-
-
-def _parse_duration_seconds(raw: str | None) -> int | None:
-    if not raw:
-        return None
-    text = raw.strip().lower()
-    total = 0
-    found = False
-    for amount, unit in re.findall(r"(\d+)\s*([hms])", text):
-        found = True
-        num = int(amount)
-        if unit == "h":
-            total += num * 3600
-        elif unit == "m":
-            total += num * 60
-        else:
-            total += num
-    return total if found else None
+_NANO_AIU_PER_CREDIT = 1_000_000_000
+_COPILOT_SESSION_STATE_DIR = Path(
+    os.environ.get("COPILOT_SESSION_STATE_DIR", str(Path.home() / ".copilot" / "session-state"))
+)
 
 
 def _format_duration(seconds: int | None) -> str | None:
@@ -283,61 +235,6 @@ def _format_duration(seconds: int | None) -> str | None:
     if mins > 0:
         return f"{mins}m {secs}s"
     return f"{secs}s"
-
-
-def _parse_copilot_usage(output: str) -> dict:
-    parsed: dict = {}
-    for line in output.splitlines():
-        text = line.strip()
-        if not text:
-            continue
-
-        # Copilot CLI usage summaries can include decorative box-drawing prefixes.
-        changes_match = re.search(r"Changes\s+\+(\d+)\s+-(\d+)", text, re.IGNORECASE)
-        if changes_match:
-            parsed["changes_added"] = int(changes_match.group(1))
-            parsed["changes_removed"] = int(changes_match.group(2))
-            continue
-
-        credit_match = re.search(r"AI Credits\s+([0-9]+(?:\.[0-9]+)?)\s+\(([^)]+)\)", text, re.IGNORECASE)
-        if credit_match:
-            parsed["ai_credits_used"] = float(credit_match.group(1))
-            parsed["ai_elapsed_text"] = credit_match.group(2).strip()
-            parsed["ai_elapsed_seconds"] = _parse_duration_seconds(parsed["ai_elapsed_text"])
-            continue
-
-        token_match = re.search(
-            r"Tokens\s+↑\s+([0-9]+(?:\.[0-9]+)?[kKmM]?)\s+\(([^)]*)\)\s+•\s+↓\s+([0-9]+(?:\.[0-9]+)?[kKmM]?)\s+\(([^)]*)\)",
-            text,
-            re.IGNORECASE,
-        )
-        if token_match:
-            input_total = _parse_scaled_number(token_match.group(1))
-            input_detail = token_match.group(2)
-            output_total = _parse_scaled_number(token_match.group(3))
-            output_detail = token_match.group(4)
-
-            cached_match = re.search(r"([0-9]+(?:\.[0-9]+)?[kKmM]?)\s+cached\b", input_detail)
-            written_match = re.search(r"([0-9]+(?:\.[0-9]+)?[kKmM]?)\s+written\b", input_detail)
-            reasoning_match = re.search(r"([0-9]+(?:\.[0-9]+)?[kKmM]?)\s+reasoning\b", output_detail)
-
-            parsed["tokens_input_total"] = input_total
-            parsed["tokens_input_cached"] = _parse_scaled_number(cached_match.group(1)) if cached_match else None
-            parsed["tokens_input_written"] = _parse_scaled_number(written_match.group(1)) if written_match else None
-            parsed["tokens_output_total"] = output_total
-            parsed["tokens_output_reasoning"] = _parse_scaled_number(reasoning_match.group(1)) if reasoning_match else None
-            continue
-
-    return parsed
-
-
-def _safe_float(raw: str | None, default: float) -> float:
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
 
 
 def _collect_change_stats(repo_path: str, env: dict[str, str]) -> dict[str, int]:
@@ -413,90 +310,131 @@ def _collect_repo_instruction_context(repo_path: str) -> list[dict[str, str]]:
     return artifacts
 
 
-def _merge_usage(
-    estimated_usage: dict,
-    snapshots: list[dict],
-    changes_override: dict[str, int] | None = None,
-) -> dict:
-    usage = dict(estimated_usage)
+def _safe_int(raw: object, default: int = 0) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
+
+def _extract_copilot_session_id(output: str) -> str | None:
+    match = re.search(r"--resume=([0-9a-fA-F-]{36})", output)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _read_shutdown_event(events_file: Path) -> dict | None:
+    if not events_file.exists() or not events_file.is_file():
+        return None
+
+    shutdown_data: dict | None = None
+    with events_file.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") != "session.shutdown":
+                continue
+            data = payload.get("data")
+            if isinstance(data, dict):
+                shutdown_data = data
+
+    return shutdown_data
+
+
+def _load_shutdown_events(session_ids: list[str]) -> list[dict]:
+    if not _COPILOT_SESSION_STATE_DIR.exists() or not _COPILOT_SESSION_STATE_DIR.is_dir():
+        return []
+
+    unique_ids = [sid for sid in dict.fromkeys(session_ids) if sid]
+    events: list[dict] = []
+
+    if unique_ids:
+        candidates = [_COPILOT_SESSION_STATE_DIR / sid / "events.jsonl" for sid in unique_ids]
+    else:
+        candidates = sorted(
+            (path / "events.jsonl" for path in _COPILOT_SESSION_STATE_DIR.iterdir() if path.is_dir()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        candidates = candidates[:1]
+
+    for events_file in candidates:
+        shutdown = _read_shutdown_event(events_file)
+        if shutdown:
+            events.append(shutdown)
+
+    return events
+
+
+def _build_usage_from_session_logs(session_ids: list[str], changes_override: dict[str, int] | None = None) -> dict:
+    shutdown_events = _load_shutdown_events(session_ids)
+    session_log_found = bool(shutdown_events)
+
+    total_nano_aiu = 0
+    total_api_duration_ms = 0
+    token_input = 0
+    token_output = 0
+    token_cache_read = 0
+    token_cache_write = 0
     changes_added = 0
     changes_removed = 0
-    credits_used = 0.0
-    credits_found = False
-    elapsed_seconds = 0
-    elapsed_found = False
-    tokens_input_total = 0
-    tokens_input_cached = 0
-    tokens_input_written = 0
-    tokens_output_total = 0
-    tokens_output_reasoning = 0
-    tokens_found = False
 
-    for snap in snapshots:
-        if "changes_added" in snap:
-            changes_added += int(snap.get("changes_added") or 0)
-        if "changes_removed" in snap:
-            changes_removed += int(snap.get("changes_removed") or 0)
+    for event in shutdown_events:
+        total_nano_aiu += _safe_int(event.get("totalNanoAiu"))
+        total_api_duration_ms += _safe_int(event.get("totalApiDurationMs"))
 
-        if "ai_credits_used" in snap:
-            credits_used += float(snap.get("ai_credits_used") or 0)
-            credits_found = True
+        token_details = event.get("tokenDetails") if isinstance(event.get("tokenDetails"), dict) else {}
+        token_input += _safe_int(((token_details.get("input") or {}).get("tokenCount") if token_details else 0))
+        token_output += _safe_int(((token_details.get("output") or {}).get("tokenCount") if token_details else 0))
+        token_cache_read += _safe_int(((token_details.get("cache_read") or {}).get("tokenCount") if token_details else 0))
+        token_cache_write += _safe_int(((token_details.get("cache_write") or {}).get("tokenCount") if token_details else 0))
 
-        if snap.get("ai_elapsed_seconds") is not None:
-            elapsed_seconds += int(snap["ai_elapsed_seconds"])
-            elapsed_found = True
+        code_changes = event.get("codeChanges") if isinstance(event.get("codeChanges"), dict) else {}
+        changes_added += _safe_int(code_changes.get("linesAdded"))
+        changes_removed += _safe_int(code_changes.get("linesRemoved"))
 
-        token_values = (
-            snap.get("tokens_input_total"),
-            snap.get("tokens_input_cached"),
-            snap.get("tokens_input_written"),
-            snap.get("tokens_output_total"),
-            snap.get("tokens_output_reasoning"),
-        )
-        if any(value is not None for value in token_values):
-            tokens_found = True
-            tokens_input_total += int(snap.get("tokens_input_total") or 0)
-            tokens_input_cached += int(snap.get("tokens_input_cached") or 0)
-            tokens_input_written += int(snap.get("tokens_input_written") or 0)
-            tokens_output_total += int(snap.get("tokens_output_total") or 0)
-            tokens_output_reasoning += int(snap.get("tokens_output_reasoning") or 0)
+    cached_tokens = token_cache_read + token_cache_write
+    total_tokens = token_input + token_output + cached_tokens
+    duration_seconds = round(total_api_duration_ms / 1000) if total_api_duration_ms > 0 else None
 
     use_changes_override = bool(changes_override) and any(
         int((changes_override or {}).get(key, 0)) > 0 for key in ("added", "removed")
     )
-    usage["changes"] = (changes_override or {}) if use_changes_override else {
+    changes = (changes_override or {}) if use_changes_override else {
         "added": changes_added,
         "removed": changes_removed,
     }
 
-    input_cost_rate = _safe_float(os.environ.get("COPILOT_INPUT_COST_PER_1K"), 0.003)
-    output_cost_rate = _safe_float(os.environ.get("COPILOT_OUTPUT_COST_PER_1K"), 0.015)
-
-    if credits_found:
-        usage["ai_credits_used"] = round(credits_used, 2)
-        usage["estimated_cost_usd"] = round(credits_used * 0.01, 4)
-
-    usage["ai"] = {
-        "elapsed_seconds": elapsed_seconds if elapsed_found else None,
-        "elapsed_text": _format_duration(elapsed_seconds) if elapsed_found else None,
+    ai_credits_used = total_nano_aiu / _NANO_AIU_PER_CREDIT
+    usage = {
+        "source": "copilot_session_logs",
+        "session_log_found": session_log_found,
+        "session_ids": list(dict.fromkeys(session_ids)),
+        "total_nano_aiu": total_nano_aiu,
+        "changes": changes,
+        "ai_credits_used": round(ai_credits_used, 4),
+        "estimated_cost_usd": round(ai_credits_used * 0.01, 4),
+        "ai": {
+            "duration_seconds": duration_seconds,
+            "duration_text": _format_duration(duration_seconds),
+            "total_api_duration_ms": total_api_duration_ms or None,
+        },
+        "tokens": {
+            "found": session_log_found,
+            "total": total_tokens if session_log_found else None,
+            "input": token_input if session_log_found else None,
+            "output": token_output if session_log_found else None,
+            "cached": cached_tokens if session_log_found else None,
+            "cache_read": token_cache_read if session_log_found else None,
+            "cache_write": token_cache_write if session_log_found else None,
+        },
     }
-
-    usage["tokens"] = {
-        "found": tokens_found,
-        "input_total": tokens_input_total if tokens_found else None,
-        "input_cached": tokens_input_cached if tokens_found else None,
-        "input_written": tokens_input_written if tokens_found else None,
-        "output_total": tokens_output_total if tokens_found else None,
-        "output_reasoning": tokens_output_reasoning if tokens_found else None,
-    }
-
-    if tokens_found:
-        token_cost = (tokens_input_total / 1000.0) * input_cost_rate + (tokens_output_total / 1000.0) * output_cost_rate
-        usage["tokens"]["estimated_cost_usd"] = round(token_cost, 4)
-        if "estimated_cost_usd" not in usage:
-            usage["estimated_cost_usd"] = round(token_cost, 4)
-
     return usage
 
 
@@ -516,9 +454,7 @@ def run_orchestration(
     branch_name = _build_branch_name(jira_ticket_id)
     steps: list[StepResult] = []
     copilot_notes: list[str] = []
-    copilot_requests = 0
-    total_output_chars = 0
-    copilot_usage_snapshots: list[dict] = []
+    copilot_session_ids: list[str] = []
     repo_instructions = []
 
     run_id = f"otf-agentic-{uuid.uuid4().hex[:8]}"
@@ -626,9 +562,9 @@ def run_orchestration(
         "summarize changed files, test outcomes, and any follow-up risks."
     )
     output = _run_copilot_prompt(full_prompt, cwd=repo_path, env=env)
-    copilot_requests += 1
-    total_output_chars += len(output)
-    copilot_usage_snapshots.append(_parse_copilot_usage(output))
+    session_id = _extract_copilot_session_id(output)
+    if session_id:
+        copilot_session_ids.append(session_id)
     if output:
         copilot_notes.append(output)
 
@@ -750,9 +686,8 @@ def run_orchestration(
     _emit_progress(progress_callback, "create_pr", "success", pr_url)
     steps.append(StepResult(name="create_pr", status="success", details=pr_url))
 
-    usage = _merge_usage(
-        _estimate_usage(copilot_requests, total_output_chars),
-        copilot_usage_snapshots,
+    usage = _build_usage_from_session_logs(
+        copilot_session_ids,
         changes_override=changes_summary,
     )
 
