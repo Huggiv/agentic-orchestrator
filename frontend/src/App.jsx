@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import ExecutingJobs from './ExecutingJobs'
+import ChatConsole from './ChatConsole'
 import JobFlowSteps, { computeFlowProgress, buildLogRows, RawLogsTable } from './JobFlowSteps'
 import { getModels } from './services/models'
 
@@ -212,6 +213,24 @@ export default function App() {
     loadHistory().catch(() => undefined)
   }
 
+  const handleChatQueuedJobs = (jobs) => {
+    if (!Array.isArray(jobs) || jobs.length === 0) return
+    const nextJobs = jobs.map((job) => ({
+      id: job.job_id,
+      jira_ticket_id: job.jira_ticket_id,
+      repository,
+      selected_agent: selectedAgent,
+      selected_model: selectedModel || null,
+    }))
+    setRunningJobs((prev) => {
+      const byId = new Map(prev.map((item) => [item.id, item]))
+      nextJobs.forEach((item) => byId.set(item.id, item))
+      return Array.from(byId.values())
+    })
+    loadHistory().catch(() => undefined)
+    setActiveTab('executing')
+  }
+
   // Jira ticket ID validation: must match pattern like PROJ-123
   const JIRA_TICKET_PATTERN = /^[A-Z][A-Z0-9_]+-\d+$/
 
@@ -378,6 +397,12 @@ export default function App() {
             Run
           </button>
           <button
+            className={`topnav-tab${activeTab === 'chat' ? ' topnav-tab--active' : ''}`}
+            onClick={() => setActiveTab('chat')}
+          >
+            Chat
+          </button>
+          <button
             className={`topnav-tab${activeTab === 'executing' ? ' topnav-tab--active' : ''}`}
             onClick={() => setActiveTab('executing')}
           >
@@ -519,6 +544,22 @@ export default function App() {
         <section className="panel">
           <ExecutingJobs runningJobs={runningJobs} onJobComplete={handleJobComplete} />
         </section>
+      )}
+
+      {activeTab === 'chat' && (
+        <ChatConsole
+          repository={repository}
+          setRepository={setRepository}
+          reviewer={reviewer}
+          setReviewer={setReviewer}
+          selectedAgent={selectedAgent}
+          setSelectedAgent={setSelectedAgent}
+          selectedModel={selectedModel}
+          setSelectedModel={setSelectedModel}
+          availableAgents={availableAgents}
+          availableModels={availableModels}
+          onJobsQueued={handleChatQueuedJobs}
+        />
       )}
 
       {activeTab === 'history' && (

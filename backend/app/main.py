@@ -20,7 +20,7 @@ def _load_environment() -> None:
 
 _load_environment()
 
-from app.routers import jira, models, orchestrate  # noqa: E402 — must import after dotenv
+from app.routers import chat, jira, models, orchestrate  # noqa: E402 — must import after dotenv
 
 app = FastAPI(title="AGENT_FLOW Orchestrator API", version="0.1.0")
 
@@ -34,6 +34,7 @@ app.add_middleware(
 app.include_router(jira.router)
 app.include_router(models.router)
 app.include_router(orchestrate.router)
+app.include_router(chat.router)
 
 
 @app.get("/health")

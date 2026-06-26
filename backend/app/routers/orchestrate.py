@@ -74,6 +74,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _fetch_jira_details(jira_ticket_id: str) -> dict:
+    try:
+        issue = jira_service.get_issue(jira_ticket_id)
+    except Exception:
+        return {}
+
+    return {
+        "jira_title": issue.get("summary", ""),
+        "jira_summary": issue.get("summary", ""),
+        "jira_description": issue.get("description", ""),
+        "jira_type": issue.get("type", ""),
+    }
+
+
 def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
     history_store = get_history_store()
     history_store.set_job_fields(job_id, status="running", started_at=_now())
@@ -111,44 +125,39 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
         )
 
 
-@router.post("/orchestrate")
-def orchestrate(payload: OrchestrateRequest):
+def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional[dict] = None) -> dict:
     job_id = str(uuid4())
     created_at = _now()
-    
-    # Fetch full Jira details
-    jira_details = {}
-    try:
-        issue = jira_service.get_issue(payload.jira_ticket_id)
-        jira_details = {
-            "jira_title": issue.get("summary", ""),
-            "jira_summary": issue.get("summary", ""),
-            "jira_description": issue.get("description", ""),
-            "jira_type": issue.get("type", ""),
-        }
-    except Exception:
-        pass
-    
+
+    request_payload = {
+        "jira_ticket_id": payload.jira_ticket_id,
+        "repository": payload.repository,
+        "base_branch": payload.base_branch,
+        "reviewer": payload.reviewer,
+        "selected_agent": payload.selected_agent,
+        "selected_model": payload.selected_model,
+        "commit_message": payload.commit_message,
+        "change_plan": payload.change_plan,
+        "jira_url": os.environ.get("JIRA_URL"),
+        **_fetch_jira_details(payload.jira_ticket_id),
+    }
+    if request_context:
+        request_payload.update(request_context)
+
     get_history_store().create_job(
         job_id=job_id,
         created_at=created_at,
-        request_payload={
-            "jira_ticket_id": payload.jira_ticket_id,
-            "repository": payload.repository,
-            "base_branch": payload.base_branch,
-            "reviewer": payload.reviewer,
-            "selected_agent": payload.selected_agent,
-            "selected_model": payload.selected_model,
-            "commit_message": payload.commit_message,
-            "change_plan": payload.change_plan,
-            "jira_url": os.environ.get("JIRA_URL"),
-            **jira_details,
-        },
+        request_payload=request_payload,
     )
 
     worker = Thread(target=_run_job, args=(job_id, payload), daemon=True)
     worker.start()
     return {"job_id": job_id, "status": "queued"}
+
+
+@router.post("/orchestrate")
+def orchestrate(payload: OrchestrateRequest):
+    return enqueue_orchestration(payload)
 
 
 @router.get("/orchestrate/history")
