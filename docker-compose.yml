@@ -14,9 +14,9 @@ services:
       - "8015:8015"
     volumes:
       - ./.env:/app/.env:ro
-      - /home/vithuggi/agent_flow-tmp-repos:/tmp/agent_flow-tmp-repos
-      - /home/vithuggi/agent_flow-history:/tmp/agent_flow-history
-      - /home/vithuggi/.copilot/agentic-orch:/root/.copilot/session-state
+      - ${AGENT_FLOW_HOST_REPO_DIR:-${HOME}/agent_flow-tmp-repos}:/tmp/agent_flow-tmp-repos
+      - ${AGENT_FLOW_HOST_HISTORY_DIR:-${HOME}/agent_flow-history}:/tmp/agent_flow-history
+      - ${AGENT_FLOW_HOST_COPILOT_STATE_DIR:-${HOME}/.copilot/agentic-orch}:/root/.copilot/session-state
 
   frontend:
     build:

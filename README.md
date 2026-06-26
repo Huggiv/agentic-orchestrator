@@ -150,6 +150,14 @@ Runtime notes:
 - Root `.env` is mounted to `/app/.env` in both containers.
 - Frontend proxies to backend using `VITE_PROXY_TARGET=http://backend:8015`.
 - Backend clones target repositories into temp workspace for each run.
+- Host bind mounts default to `${HOME}/agent_flow-tmp-repos`, `${HOME}/agent_flow-history`, and `${HOME}/.copilot/agentic-orch`.
+- You can override host paths in `.env` with `AGENT_FLOW_HOST_REPO_DIR`, `AGENT_FLOW_HOST_HISTORY_DIR`, and `AGENT_FLOW_HOST_COPILOT_STATE_DIR`.
+
+Before first run, create the host mount directories:
+
+```bash
+mkdir -p "$HOME/agent_flow-tmp-repos" "$HOME/agent_flow-history" "$HOME/.copilot/agentic-orch"
+```
 
 ## API Reference
 
