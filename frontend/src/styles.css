@@ -370,6 +370,25 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 
+.model-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.secondary-button {
+  box-shadow: none;
+  background: #15324f;
+  border: 1px solid #3f5f83;
+  color: #d3e8ff;
+  padding: 0.56rem 0.72rem;
+}
+
+.secondary-button:hover {
+  background: #1a4068;
+}
+
 label {
   display: grid;
   gap: 0.35rem;
@@ -1568,6 +1587,10 @@ button:hover {
 .jira-results-table-wrap {
   margin-top: 0.7rem;
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
 }
 
 .jira-selection-actions {
@@ -1602,6 +1625,11 @@ button:hover {
   overflow-y: auto;
 }
 
+.bulk-model-refresh-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .bulk-run-card {
   border: 1px solid #304764;
   border-radius: 12px;
@@ -1625,9 +1653,6 @@ button:hover {
 .jira-results-table {
   width: 100%;
   border-collapse: collapse;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
   background: #111a2a;
 }
 
@@ -1640,6 +1665,10 @@ button:hover {
 }
 
 .jira-results-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #142238;
   color: #93c5fd;
   font-size: 0.74rem;
   text-transform: uppercase;
@@ -1759,6 +1788,16 @@ button:hover {
   max-width: 165px;
 }
 
+.chat-model-refresh {
+  background: #183452;
+  border: 1px solid #3f5f83;
+  color: #d3e8ff;
+}
+
+.chat-model-refresh:hover {
+  background: #1d446b;
+}
+
 .chat-inline-confirm {
   margin-top: 0.35rem;
   border: 1px solid #3f536f;
@@ -1781,6 +1820,31 @@ button:hover {
   color: #e2e8f0;
   font-size: 0.78rem;
   line-height: 1.45;
+}
+
+.chat-job-controls {
+  margin-top: 0.35rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.chat-job-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  padding: 0.38rem 0.5rem;
+  border: 1px solid #35537a;
+  border-radius: 8px;
+  background: #122237;
+  font-size: 0.77rem;
+}
+
+.chat-job-row button {
+  box-shadow: none;
+  padding: 0.25rem 0.5rem;
+  border-radius: 7px;
+  font-size: 0.72rem;
 }
 
 .chat-phases {

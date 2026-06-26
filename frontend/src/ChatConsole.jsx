@@ -40,6 +40,8 @@ export default function ChatConsole({
   setSelectedModel,
   availableAgents,
   availableModels,
+  modelsLoading,
+  onRefreshModels,
   onJobsQueued,
 }) {
   const [isOpen, setIsOpen] = useState(false)
@@ -481,7 +483,26 @@ export default function ChatConsole({
 
       if (confirm) {
         const queuedJobs = Array.isArray(data.queued_jobs) ? data.queued_jobs : []
-        if (queuedJobs.length > 0) onJobsQueued(queuedJobs)
+        if (queuedJobs.length > 0) {
+          onJobsQueued(queuedJobs)
+          updateActiveSession((session) => ({
+            ...session,
+            messages: [
+              ...session.messages,
+              {
+                id: `job-controls-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                role: 'assistant',
+                kind: 'job_controls',
+                createdAt: Date.now(),
+                content: 'Workflow jobs started. You can cancel any job below.',
+                jobs: queuedJobs.map((job) => ({
+                  ...job,
+                  status: 'queued',
+                })),
+              },
+            ],
+          }))
+        }
       }
 
       setAssistantText(assistantId, data.assistant_message || (confirm ? 'Confirmed.' : 'Cancelled.'))
@@ -490,6 +511,55 @@ export default function ChatConsole({
       setAssistantText(assistantId, 'I could not process your confirmation right now.')
     } finally {
       setIsConfirming(false)
+    }
+  }
+
+  const cancelChatJob = async (messageId, jobId) => {
+    updateActiveSession((session) => ({
+      ...session,
+      messages: session.messages.map((message) => {
+        if (message.id !== messageId || message.kind !== 'job_controls') return message
+        return {
+          ...message,
+          jobs: (message.jobs || []).map((job) =>
+            job.job_id === jobId ? { ...job, status: 'cancelling' } : job
+          ),
+        }
+      }),
+    }))
+
+    try {
+      const response = await fetch(`/api/chat/cancel/${jobId}`, { method: 'POST' })
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to cancel job')
+
+      updateActiveSession((session) => ({
+        ...session,
+        messages: session.messages.map((message) => {
+          if (message.id !== messageId || message.kind !== 'job_controls') return message
+          return {
+            ...message,
+            jobs: (message.jobs || []).map((job) =>
+              job.job_id === jobId ? { ...job, status: data.status || 'cancelled' } : job
+            ),
+          }
+        }),
+      }))
+    } catch (err) {
+      setChatError(err.message)
+      updateActiveSession((session) => ({
+        ...session,
+        messages: session.messages.map((message) => {
+          if (message.id !== messageId || message.kind !== 'job_controls') return message
+          return {
+            ...message,
+            jobs: (message.jobs || []).map((job) =>
+              job.job_id === jobId ? { ...job, status: 'error' } : job
+            ),
+          }
+        }),
+      }))
     }
   }
 
@@ -592,6 +662,23 @@ export default function ChatConsole({
                       </div>
                     </div>
                   )}
+
+                  {message.kind === 'job_controls' && (
+                    <div className="chat-job-controls">
+                      {(message.jobs || []).map((job) => (
+                        <div key={job.job_id} className="chat-job-row">
+                          <span>{job.jira_ticket_id} ({job.status || 'queued'})</span>
+                          <button
+                            type="button"
+                            onClick={() => cancelChatJob(message.id, job.job_id)}
+                            disabled={['cancelled', 'cancelling', 'success', 'failed'].includes(String(job.status || '').toLowerCase())}
+                          >
+                            {String(job.status || '').toLowerCase() === 'cancelling' ? 'Cancelling...' : 'Cancel'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </article>
               ))}
 
@@ -623,6 +710,14 @@ export default function ChatConsole({
                     <option key={model.id} value={model.id}>{model.name}</option>
                   ))}
                 </select>
+                <button
+                  type="button"
+                  className="chat-model-refresh"
+                  onClick={onRefreshModels}
+                  disabled={modelsLoading}
+                >
+                  {modelsLoading ? 'Refreshing...' : 'Refresh'}
+                </button>
                 <button type="submit" disabled={!canSend}>
                   {isSending ? 'Sending...' : 'Send'}
                 </button>

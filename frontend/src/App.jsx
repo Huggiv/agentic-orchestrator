@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import ExecutingJobs from './ExecutingJobs'
 import ChatConsole from './ChatConsole'
 import JobFlowSteps, { computeFlowProgress, buildLogRows, RawLogsTable } from './JobFlowSteps'
-import { getModels } from './services/models'
+import { getModels, refreshModels } from './services/models'
 
 const defaultPlan = [
   'Analyze impacted files',
@@ -124,6 +124,8 @@ export default function App() {
   const [selectedAgent, setSelectedAgent] = useState('SWE')
   const [availableModels, setAvailableModels] = useState([])
   const [selectedModel, setSelectedModel] = useState('')   // '' = Auto (no --model flag)
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [modelsError, setModelsError] = useState('')
   const [ticketError, setTicketError] = useState('')
   const [repository, setRepository] = useState('vittal-huggi_ADVNTST/v93000_telemetry_station')
   const [reviewer, setReviewer] = useState('')
@@ -185,17 +187,41 @@ export default function App() {
     setSelectedAgent((prev) => (nextAgents.includes(prev) ? prev : nextAgents[0]))
   }
 
+  const loadModels = async ({ force = false } = {}) => {
+    setModelsLoading(true)
+    setModelsError('')
+    try {
+      const models = force ? await refreshModels() : await getModels()
+      if (Array.isArray(models) && models.length > 0) {
+        setAvailableModels(models)
+        return models
+      }
+
+      // Extra fallback for rare cases where cached read returned empty.
+      const response = await fetch('/api/models')
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to fetch models')
+      const directModels = Array.isArray(data.models) ? data.models : []
+      setAvailableModels(directModels)
+      return directModels
+    } catch (err) {
+      setAvailableModels([])
+      setModelsError(err?.message || 'Failed to fetch models')
+      return []
+    } finally {
+      setModelsLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadHistory().catch((err) => setError(err.message))
     loadAgents().catch(() => {
       setAvailableAgents(['SWE'])
       setSelectedAgent('SWE')
     })
-    // Fetch models once at startup via the singleton — never re-fetches on re-renders.
-    getModels().then((models) => {
-      setAvailableModels(models)
-      // Keep selectedModel as '' (Auto); never auto-select a specific model.
-    })
+
+    loadModels().catch(() => undefined)
   }, [])
 
   useEffect(() => {
@@ -639,12 +665,22 @@ export default function App() {
 
                 <label>
                   Model
-                  <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-                    <option value=''>Auto</option>
-                    {availableModels.map((model) => (
-                      <option key={model.id} value={model.id}>{model.name}</option>
-                    ))}
-                  </select>
+                  <div className="model-select-row">
+                    <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+                      <option value=''>Auto</option>
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.id}>{model.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => loadModels({ force: true })}
+                      disabled={modelsLoading}
+                    >
+                      {modelsLoading ? 'Refreshing...' : 'Refresh'}
+                    </button>
+                  </div>
                 </label>
 
                 <label>
@@ -732,6 +768,7 @@ export default function App() {
               )}
             </CollapsiblePanel>
 
+            {modelsError && <section className="panel error">Model load issue: {modelsError}</section>}
             {error && <section className="panel error">{error}</section>}
 
             {result && (
@@ -1003,6 +1040,16 @@ export default function App() {
               <button type="button" onClick={() => setBulkPopupOpen(false)}>Close</button>
             </div>
             <div className="bulk-run-body">
+              <div className="bulk-model-refresh-row">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => loadModels({ force: true })}
+                  disabled={modelsLoading}
+                >
+                  {modelsLoading ? 'Refreshing models...' : 'Refresh Models'}
+                </button>
+              </div>
               {bulkTicketConfigs.map((item) => (
                 <div key={item.ticketId} className="bulk-run-card">
                   <h4>{item.ticketId}</h4>
@@ -1059,6 +1106,8 @@ export default function App() {
         setSelectedModel={setSelectedModel}
         availableAgents={availableAgents}
         availableModels={availableModels}
+        modelsLoading={modelsLoading}
+        onRefreshModels={() => loadModels({ force: true })}
         onJobsQueued={handleChatQueuedJobs}
       />
 

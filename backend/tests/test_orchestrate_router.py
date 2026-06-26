@@ -189,7 +189,24 @@ def test_chat_message_without_ticket_returns_guidance():
     assert payload["tickets"] == []
     assert payload["queued_jobs"] == []
     assert payload["failed_tickets"] == []
-    assert "Include at least one Jira ticket key" in payload["assistant_message"]
+    assert payload["assistant_message"]
+
+
+def test_chat_message_without_ticket_uses_llm_reply(monkeypatch):
+    monkeypatch.setattr("app.routers.chat._respond_with_llm", lambda prompt, selected_model: "- short answer")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/chat/message",
+            json={
+                "message": "Can you help me plan an implementation?",
+                "repository": "owner/repo",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+    assert payload["assistant_message"] == "- short answer"
 
 
 def test_chat_stream_emits_result_and_done_events(monkeypatch):
@@ -219,6 +236,57 @@ def test_chat_stream_emits_result_and_done_events(monkeypatch):
     assert "event: result" in body
     assert "event: done" in body
     assert "plan-" in body
+
+
+def test_chat_cancel_job_rejects_non_chat_trigger(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    def fake_run_orchestration(
+        jira_ticket_id,
+        repository,
+        base_branch,
+        reviewer,
+        selected_agent,
+        selected_model,
+        commit_message,
+        change_plan,
+        progress_callback,
+        cancellation_token,
+        run_id,
+    ):
+        return {
+            "branch_name": f"feature/{jira_ticket_id.lower()}",
+            "pull_request_url": f"https://github.com/{repository}/pull/1",
+            "workspace_dir": f"/tmp/{run_id}",
+            "steps": [{"name": "prepare_branch", "status": "success"}],
+            "copilot_notes": [],
+            "usage": {"ai_credits_used": 0.1, "estimated_cost_usd": 0.001},
+        }
+
+    monkeypatch.setattr("app.routers.orchestrate.run_orchestration", fake_run_orchestration)
+
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/api/orchestrate",
+            json={
+                "jira_ticket_id": "AGENT_FLOW-500",
+                "repository": "owner/repo",
+                "base_branch": "development",
+                "reviewer": None,
+                "selected_agent": "SWE",
+                "commit_message": "feat(agent_flow-500): automated implementation",
+                "change_plan": ["Implement", "Test"],
+            },
+        )
+        create_response.raise_for_status()
+        job_id = create_response.json()["job_id"]
+        _wait_for_status(client, job_id=job_id, expected="success")
+
+        cancel_response = client.post(f"/api/chat/cancel/{job_id}")
+        assert cancel_response.status_code == 409
+
+    reset_history_store_for_tests()
 
 
 def test_cancel_orchestration_marks_job_cancelled(monkeypatch, tmp_path):

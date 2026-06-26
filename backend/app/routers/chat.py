@@ -7,12 +7,14 @@ from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter
+from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.orchestration import OrchestrationError, _prepare_env, _run_copilot_prompt
 from app.jira import service as jira_service
-from app.routers.orchestrate import OrchestrateRequest, enqueue_orchestration
+from app.history_store import get_history_store
+from app.routers.orchestrate import OrchestrateRequest, cancel_orchestration, enqueue_orchestration
 
 router = APIRouter(prefix="/api", tags=["chat"])
 _CHAT_PLAN_TTL = timedelta(minutes=20)
@@ -181,6 +183,27 @@ def _groom_with_llm(prompt: str, ticket_ids: list[str], issues: list[dict], sele
         )
 
 
+def _respond_with_llm(prompt: str, selected_model: str | None) -> str:
+    env = _prepare_env()
+    chat_prompt = (
+        "You are a concise engineering assistant in a web chat. "
+        "Answer the user request in 3-6 short bullet points, practical and actionable.\n\n"
+        f"User request:\n{prompt}"
+    )
+    try:
+        output = _run_copilot_prompt(
+            chat_prompt,
+            cwd="/tmp",
+            env=env,
+            agent_name="SWE",
+            model=selected_model,
+        )
+        text = (output or "").strip()
+        return text or "I can help with that. Share more context and I will provide a concise plan."
+    except OrchestrationError:
+        return "I can help with that. Share Jira tickets to run workflows, or provide more context for a concise solution."
+
+
 def _build_plan_change_plan(prompt: str, issue: dict, groomed_plan: str) -> list[str]:
     summary = str(issue.get("summary") or "").strip()
     issue_type = str(issue.get("type") or "").strip()
@@ -221,10 +244,9 @@ def chat_message(payload: ChatMessageRequest):
     prompt = payload.message.strip()
     ticket_ids = _extract_ticket_ids(prompt)
     if not ticket_ids:
+        llm_reply = _respond_with_llm(prompt, payload.selected_model)
         return {
-            "assistant_message": (
-                "I can groom Jira issues with the LLM first. Include at least one Jira ticket key such as AGENT_FLOW-101."
-            ),
+            "assistant_message": llm_reply,
             "tickets": [],
             "queued_jobs": [],
             "failed_tickets": [],
@@ -299,9 +321,8 @@ def chat_message_stream(payload: ChatMessageRequest):
         yield _sse_event("tickets", {"tickets": ticket_ids})
 
         if not ticket_ids:
-            assistant_message = (
-                "I can groom Jira issues with the LLM first. Include at least one Jira ticket key such as AGENT_FLOW-101."
-            )
+            yield _sse_event("status", {"message": "Generating concise response"})
+            assistant_message = _respond_with_llm(prompt, payload.selected_model)
             for delta in _chunk_text(assistant_message):
                 yield _sse_event("assistant_token", {"delta": delta})
             yield _sse_event(
@@ -401,6 +422,19 @@ def chat_message_stream(payload: ChatMessageRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/chat/cancel/{job_id}")
+def chat_cancel_job(job_id: str):
+    job = get_history_store().get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Orchestration job not found")
+
+    request_payload = job.get("request") or {}
+    if request_payload.get("trigger_source") != "chat":
+        raise HTTPException(status_code=409, detail="Only chat-triggered jobs can be cancelled from chat")
+
+    return cancel_orchestration(job_id)
 
 
 @router.post("/chat/confirm")
