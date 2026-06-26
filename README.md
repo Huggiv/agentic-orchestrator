@@ -223,6 +223,7 @@ Sample request:
 Generated architecture and project documentation:
 
 - `changelog.md`
+- `docs/releases/v1.0.2.md`
 - `docs/releases/v1.0.0.md`
 - `docs/project-summary.md`
 - `docs/diagrams/high-level-architecture.puml`
