@@ -34,7 +34,7 @@ def test_prepare_env_prefers_gh_auth_token_for_copilot(monkeypatch):
 
 
 def test_run_copilot_prompt_rewrites_auth_error(monkeypatch):
-    def fake_run(cmd, cwd, env):
+    def fake_run(cmd, cwd, env, cancellation_token=None):
         raise OrchestrationError(
             "Authentication failed. Your GitHub token may be invalid or missing Copilot Requests permission."
         )
@@ -50,7 +50,7 @@ def test_run_copilot_prompt_rewrites_auth_error(monkeypatch):
 def test_run_copilot_prompt_includes_agent_flag(monkeypatch):
     captured = {}
 
-    def fake_run(cmd, cwd, env):
+    def fake_run(cmd, cwd, env, cancellation_token=None):
         captured["cmd"] = cmd
         captured["cwd"] = cwd
         captured["env"] = env

@@ -1412,6 +1412,11 @@ button:hover {
   color: #7dd3fc;
 }
 
+.chat-message--typing {
+  border-style: dashed;
+  animation: pulseTyping 1.2s ease-in-out infinite;
+}
+
 .chat-message--user {
   justify-self: end;
   background: #2f1d13;
@@ -1450,9 +1455,95 @@ button:hover {
   color: var(--ink-muted);
 }
 
+.chat-phases {
+  border: 1px solid #31435e;
+  border-radius: 10px;
+  background: #101a2d;
+  padding: 0.65rem 0.8rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.chat-phases strong {
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #93c5fd;
+}
+
+.chat-phases ol {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.chat-phases li {
+  color: #bfdbfe;
+  font-size: 0.82rem;
+}
+
+.chat-phase--active {
+  color: #ffffff;
+  font-weight: 700;
+}
+
 .chat-error {
   margin: 0;
   color: #fca5a5;
+}
+
+.chat-confirm-panel {
+  border: 1px solid #3f536f;
+  border-radius: 10px;
+  background: #0f1b2e;
+  padding: 0.75rem 0.85rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.chat-confirm-panel strong {
+  color: #c7e0ff;
+}
+
+.chat-confirm-panel p {
+  margin: 0;
+  color: #bfdbfe;
+  font-size: 0.85rem;
+}
+
+.chat-confirm-panel pre {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  padding: 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #304764;
+  background: #0b1424;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.chat-confirm-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.chat-confirm-actions button {
+  box-shadow: none;
+}
+
+.chat-confirm-cancel {
+  background: #1f2937;
+  color: #f8fafc;
+  border: 1px solid #475569;
+}
+
+.chat-confirm-cancel:hover {
+  background: #334155;
 }
 
 .ag-theme-quartz {
@@ -1473,6 +1564,18 @@ button:hover {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes pulseTyping {
+  0% {
+    opacity: 0.78;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.78;
   }
 }
 
@@ -1498,5 +1601,9 @@ button:hover {
   .chat-actions {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .chat-confirm-actions {
+    flex-direction: column;
   }
 }

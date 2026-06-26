@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Optional
 from uuid import uuid4
 
@@ -13,10 +13,12 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException, Query
 
 from app.history_store import get_history_store
-from app.orchestration import OrchestrationError, run_orchestration
+from app.orchestration import CancellationToken, OrchestrationCancelled, OrchestrationError, run_orchestration
 from app.jira import service as jira_service
 
 router = APIRouter(prefix="/api", tags=["orchestrate"])
+_JOB_CANCEL_TOKENS: dict[str, CancellationToken] = {}
+_JOB_CANCEL_LOCK = Lock()
 
 
 class OrchestrateRequest(BaseModel):
@@ -89,6 +91,11 @@ def _fetch_jira_details(jira_ticket_id: str) -> dict:
 
 
 def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
+    with _JOB_CANCEL_LOCK:
+        cancel_token = _JOB_CANCEL_TOKENS.get(job_id)
+    if cancel_token is None:
+        return
+
     history_store = get_history_store()
     history_store.set_job_fields(job_id, status="running", started_at=_now())
 
@@ -106,6 +113,7 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             commit_message=payload.commit_message,
             change_plan=payload.change_plan,
             progress_callback=progress_callback,
+            cancellation_token=cancel_token,
         )
         history_store.set_job_fields(
             job_id,
@@ -113,6 +121,13 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             finished_at=_now(),
             result=result,
             error=None,
+        )
+    except OrchestrationCancelled:
+        history_store.set_job_fields(
+            job_id,
+            status="cancelled",
+            finished_at=_now(),
+            error="Cancelled by user request",
         )
     except OrchestrationError as e:
         history_store.set_job_fields(job_id, status="failed", finished_at=_now(), error=str(e))
@@ -123,6 +138,9 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             finished_at=_now(),
             error=f"Unexpected error: {e}",
         )
+    finally:
+        with _JOB_CANCEL_LOCK:
+            _JOB_CANCEL_TOKENS.pop(job_id, None)
 
 
 def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional[dict] = None) -> dict:
@@ -149,6 +167,9 @@ def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional
         created_at=created_at,
         request_payload=request_payload,
     )
+
+    with _JOB_CANCEL_LOCK:
+        _JOB_CANCEL_TOKENS[job_id] = CancellationToken()
 
     worker = Thread(target=_run_job, args=(job_id, payload), daemon=True)
     worker.start()
@@ -180,3 +201,39 @@ def orchestrate_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Orchestration job not found")
     return job
+
+
+@router.post("/orchestrate/{job_id}/cancel")
+def cancel_orchestration(job_id: str):
+    history_store = get_history_store()
+    job = history_store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Orchestration job not found")
+
+    status = str(job.get("status") or "")
+    if status in {"success", "failed", "cancelled"}:
+        return {"job_id": job_id, "status": status, "cancelled": False}
+
+    with _JOB_CANCEL_LOCK:
+        token = _JOB_CANCEL_TOKENS.get(job_id)
+
+    if token is None:
+        history_store.set_job_fields(
+            job_id,
+            status="cancelled",
+            finished_at=_now(),
+            error="Cancelled by user request",
+        )
+        return {"job_id": job_id, "status": "cancelled", "cancelled": True}
+
+    token.cancel()
+    history_store.append_progress(
+        job_id,
+        {
+            "timestamp": _now(),
+            "name": "cancel_requested",
+            "status": "running",
+            "details": "User requested cancellation",
+        },
+    )
+    return {"job_id": job_id, "status": "cancelling", "cancelled": True}

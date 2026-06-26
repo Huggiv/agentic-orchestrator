@@ -7,7 +7,9 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,6 +23,42 @@ from app.jira import service as jira_service
 
 class OrchestrationError(Exception):
     """Raised when orchestration execution fails."""
+
+
+class OrchestrationCancelled(OrchestrationError):
+    """Raised when orchestration is cancelled by user action."""
+
+
+class CancellationToken:
+    """Track cancellation state and terminate active subprocess process groups."""
+
+    def __init__(self) -> None:
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._active_pgid: int | None = None
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def throw_if_cancelled(self) -> None:
+        if self._cancelled.is_set():
+            raise OrchestrationCancelled("Cancelled by user request")
+
+    def set_active_pgid(self, pgid: int | None) -> None:
+        with self._lock:
+            self._active_pgid = pgid
+
+    def clear_active_pgid(self) -> None:
+        with self._lock:
+            self._active_pgid = None
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+        with self._lock:
+            pgid = self._active_pgid
+        if pgid is not None:
+            _terminate_process_group(pgid)
 
 
 @dataclass
@@ -94,21 +132,70 @@ _SPECIALIST_AGENT_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-def _run(cmd: list[str], cwd: str, env: dict[str, str]) -> str:
-    proc = subprocess.run(
+def _terminate_process_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+
+
+def _run(
+    cmd: list[str],
+    cwd: str,
+    env: dict[str, str],
+    cancellation_token: CancellationToken | None = None,
+) -> str:
+    if cancellation_token:
+        cancellation_token.throw_if_cancelled()
+
+    proc = subprocess.Popen(
         cmd,
         cwd=cwd,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
+        start_new_session=True,
     )
+    if cancellation_token:
+        cancellation_token.set_active_pgid(proc.pid)
+
+    stdout_text = ""
+    stderr_text = ""
+    cancelled = False
+    try:
+        while True:
+            if cancellation_token and cancellation_token.is_cancelled:
+                cancelled = True
+                _terminate_process_group(proc.pid)
+                break
+            try:
+                stdout_text, stderr_text = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if cancellation_token:
+            cancellation_token.clear_active_pgid()
+
+    if cancelled:
+        raise OrchestrationCancelled("Cancelled by user request")
+
     if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        stdout = (proc.stdout or "").strip()
+        stderr = (stderr_text or "").strip()
+        stdout = (stdout_text or "").strip()
         detail = stderr or stdout or f"Command failed: {' '.join(shlex.quote(c) for c in cmd)}"
         raise OrchestrationError(detail)
-    return (proc.stdout or "").strip()
+    return (stdout_text or "").strip()
 
 
 def _build_branch_name(jira_ticket_id: str) -> str:
@@ -257,7 +344,14 @@ def _select_copilot_agent(issue: dict, change_plan: list[str]) -> tuple[str, str
     return DEFAULT_COPILOT_AGENT, "Default agent for code implementation"
 
 
-def _run_copilot_prompt(prompt: str, cwd: str, env: dict[str, str], agent_name: str, model: str | None = None) -> str:
+def _run_copilot_prompt(
+    prompt: str,
+    cwd: str,
+    env: dict[str, str],
+    agent_name: str,
+    model: str | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> str:
     """Run Copilot CLI in non-interactive mode with full tool permissions."""
     cmd = [
         "copilot",
@@ -273,7 +367,7 @@ def _run_copilot_prompt(prompt: str, cwd: str, env: dict[str, str], agent_name: 
         cmd.extend(["--model", model])
     cmd.extend(["-p", prompt])
     try:
-        return _run(cmd, cwd=cwd, env=env)
+        return _run(cmd, cwd=cwd, env=env, cancellation_token=cancellation_token)
     except OrchestrationError as exc:
         detail = str(exc)
         auth_markers = (
@@ -315,7 +409,11 @@ def _format_duration(seconds: int | None) -> str | None:
     return f"{secs}s"
 
 
-def _collect_change_stats(repo_path: str, env: dict[str, str]) -> dict[str, int]:
+def _collect_change_stats(
+    repo_path: str,
+    env: dict[str, str],
+    cancellation_token: CancellationToken | None = None,
+) -> dict[str, int]:
     output = _run(
         [
             "git",
@@ -327,6 +425,7 @@ def _collect_change_stats(repo_path: str, env: dict[str, str]) -> dict[str, int]
         ],
         cwd=repo_path,
         env=env,
+        cancellation_token=cancellation_token,
     )
 
     added = 0
@@ -343,11 +442,17 @@ def _collect_change_stats(repo_path: str, env: dict[str, str]) -> dict[str, int]
     return {"added": added, "removed": removed}
 
 
-def _count_commits_ahead(repo_path: str, env: dict[str, str], base_branch: str) -> int:
+def _count_commits_ahead(
+    repo_path: str,
+    env: dict[str, str],
+    base_branch: str,
+    cancellation_token: CancellationToken | None = None,
+) -> int:
     output = _run(
         ["git", "rev-list", "--count", f"{base_branch}..HEAD"],
         cwd=repo_path,
         env=env,
+        cancellation_token=cancellation_token,
     )
     try:
         return int(output.strip())
@@ -538,7 +643,11 @@ def run_orchestration(
     selected_agent: str | None = None,
     selected_model: str | None = None,
     progress_callback: Callable[[dict], None] | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> dict:
+    if cancellation_token:
+        cancellation_token.throw_if_cancelled()
+
     env = _prepare_env()
     clone_url, repo_slug = _normalize_repo(repository)
     token = env["GITHUB_TOKEN"]
@@ -567,12 +676,13 @@ def run_orchestration(
         ],
         cwd=temp_dir,
         env=env,
+        cancellation_token=cancellation_token,
     )
     _emit_progress(progress_callback, "clone_repository", "success", repo_path)
     steps.append(StepResult(name="clone_repository", status="success", details=repo_path))
 
     # Normalize origin explicitly to target repo slug.
-    _run(["git", "remote", "set-url", "origin", clone_url], cwd=repo_path, env=env)
+    _run(["git", "remote", "set-url", "origin", clone_url], cwd=repo_path, env=env, cancellation_token=cancellation_token)
 
     _emit_progress(progress_callback, "read_repo_instructions", "running")
     repo_instructions = _collect_repo_instruction_context(repo_path)
@@ -591,15 +701,15 @@ def run_orchestration(
     )
 
     _emit_progress(progress_callback, "auth_setup", "running")
-    _run(["gh", "--version"], cwd=repo_path, env=env)
-    _run(["gh", "auth", "status"], cwd=repo_path, env=env)
-    _run(["copilot", "--version"], cwd=repo_path, env=env)
+    _run(["gh", "--version"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+    _run(["gh", "auth", "status"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+    _run(["copilot", "--version"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
     copilot_source = _copilot_auth_source(env)
     _emit_progress(progress_callback, "auth_setup", "success", copilot_source)
     steps.append(StepResult(name="auth_setup", status="success", details=copilot_source))
 
     _emit_progress(progress_callback, "prepare_branch", "running", base_branch)
-    _run(["git", "checkout", base_branch], cwd=repo_path, env=env)
+    _run(["git", "checkout", base_branch], cwd=repo_path, env=env, cancellation_token=cancellation_token)
     _run(
         [
             "git",
@@ -612,8 +722,9 @@ def run_orchestration(
         ],
         cwd=repo_path,
         env=env,
+        cancellation_token=cancellation_token,
     )
-    _run(["git", "checkout", "-b", branch_name], cwd=repo_path, env=env)
+    _run(["git", "checkout", "-b", branch_name], cwd=repo_path, env=env, cancellation_token=cancellation_token)
     _emit_progress(progress_callback, "prepare_branch", "success", branch_name)
     steps.append(StepResult(name="create_and_checkout_branch", status="success", details=branch_name))
 
@@ -680,7 +791,14 @@ def run_orchestration(
         "to validate the implemented behavior. Run the relevant test commands, then "
         "summarize changed files, test outcomes, and any follow-up risks."
     )
-    output = _run_copilot_prompt(full_prompt, cwd=repo_path, env=env, agent_name=selected_agent, model=selected_model)
+    output = _run_copilot_prompt(
+        full_prompt,
+        cwd=repo_path,
+        env=env,
+        agent_name=selected_agent,
+        model=selected_model,
+        cancellation_token=cancellation_token,
+    )
     session_id = _extract_copilot_session_id(output)
     if session_id:
         copilot_session_ids.append(session_id)
@@ -737,7 +855,7 @@ def run_orchestration(
     _emit_progress(progress_callback, "agentic_implementation", "success")
     steps.append(StepResult(name="copilot_agentic_plan", status="success"))
 
-    changes_summary = _collect_change_stats(repo_path, env)
+    changes_summary = _collect_change_stats(repo_path, env, cancellation_token=cancellation_token)
 
     _emit_progress(progress_callback, "commit_changes", "running")
     _run(
@@ -751,16 +869,17 @@ def run_orchestration(
         ],
         cwd=repo_path,
         env=env,
+        cancellation_token=cancellation_token,
     )
-    staged = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, env=env)
+    staged = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
     if staged:
-        _run(["git", "config", "user.email", os.environ.get("GIT_AUTHOR_EMAIL", "agent_flow-bot@example.com")], cwd=repo_path, env=env)
-        _run(["git", "config", "user.name", os.environ.get("GIT_AUTHOR_NAME", "AGENT_FLOW Agentic Bot")], cwd=repo_path, env=env)
-        _run(["git", "commit", "-m", commit_message], cwd=repo_path, env=env)
+        _run(["git", "config", "user.email", os.environ.get("GIT_AUTHOR_EMAIL", "agent_flow-bot@example.com")], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+        _run(["git", "config", "user.name", os.environ.get("GIT_AUTHOR_NAME", "AGENT_FLOW Agentic Bot")], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+        _run(["git", "commit", "-m", commit_message], cwd=repo_path, env=env, cancellation_token=cancellation_token)
         _emit_progress(progress_callback, "commit_changes", "success", commit_message)
         steps.append(StepResult(name="commit_changes", status="success", details=commit_message))
     else:
-        commits_ahead = _count_commits_ahead(repo_path, env, base_branch)
+        commits_ahead = _count_commits_ahead(repo_path, env, base_branch, cancellation_token=cancellation_token)
         if commits_ahead > 0:
             details = f"Branch already has {commits_ahead} commit(s) ahead of {base_branch}"
             _emit_progress(progress_callback, "commit_changes", "success", details)
@@ -782,6 +901,7 @@ def run_orchestration(
         ],
         cwd=repo_path,
         env=env,
+        cancellation_token=cancellation_token,
     )
     _emit_progress(progress_callback, "push_branch", "success", branch_name)
     steps.append(StepResult(name="push_branch", status="success", details=branch_name))

@@ -12,8 +12,31 @@ const parseApiPayload = (raw) => {
 
 export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
   const [jobDetails, setJobDetails] = useState({})
+  const [cancelState, setCancelState] = useState({})
   // highlightedSteps: { [jobId]: stepKey } — set when a failed step card is clicked
   const [highlightedSteps, setHighlightedSteps] = useState({})
+
+  const cancelJob = async (jobId) => {
+    setCancelState((prev) => ({ ...prev, [jobId]: 'cancelling' }))
+    try {
+      const response = await fetch(`/api/orchestrate/${jobId}/cancel`, {
+        method: 'POST',
+      })
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to cancel job')
+      setCancelState((prev) => ({ ...prev, [jobId]: data.status || 'cancelling' }))
+      setJobDetails((prev) => ({
+        ...prev,
+        [jobId]: {
+          ...prev[jobId],
+          status: data.status === 'cancelled' ? 'cancelled' : prev[jobId]?.status || 'running',
+        },
+      }))
+    } catch {
+      setCancelState((prev) => ({ ...prev, [jobId]: 'error' }))
+    }
+  }
 
   useEffect(() => {
     if (!Array.isArray(runningJobs) || runningJobs.length === 0) {
@@ -43,7 +66,7 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
                 },
               }))
 
-              if ((statusData.status === 'success' || statusData.status === 'failed') && onJobComplete) {
+              if ((statusData.status === 'success' || statusData.status === 'failed' || statusData.status === 'cancelled') && onJobComplete) {
                 onJobComplete(job.id)
               }
               return
@@ -125,12 +148,47 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
                   fontSize: '0.75rem',
                   fontWeight: '700',
                   textTransform: 'uppercase',
-                  background: details.status === 'success' ? '#d4edda' : details.status === 'failed' ? '#f8d7da' : '#d8ebf8',
-                  color: details.status === 'success' ? '#155724' : details.status === 'failed' ? '#721c24' : '#0a4f74',
+                  background:
+                    details.status === 'success'
+                      ? '#d4edda'
+                      : details.status === 'failed'
+                        ? '#f8d7da'
+                        : details.status === 'cancelled'
+                          ? '#fef3c7'
+                          : '#d8ebf8',
+                  color:
+                    details.status === 'success'
+                      ? '#155724'
+                      : details.status === 'failed'
+                        ? '#721c24'
+                        : details.status === 'cancelled'
+                          ? '#92400e'
+                          : '#0a4f74',
                 }}
               >
                 {details.status}
               </div>
+              {(details.status === 'queued' || details.status === 'running') && (
+                <button
+                  type="button"
+                  onClick={() => cancelJob(job.id)}
+                  disabled={cancelState[job.id] === 'cancelling'}
+                  style={{
+                    marginLeft: '0.6rem',
+                    padding: '0.24rem 0.62rem',
+                    borderRadius: '12px',
+                    border: '1px solid #ef4444',
+                    background: '#fee2e2',
+                    color: '#991b1b',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    cursor: cancelState[job.id] === 'cancelling' ? 'default' : 'pointer',
+                    boxShadow: 'none',
+                  }}
+                >
+                  {cancelState[job.id] === 'cancelling' ? 'Cancelling...' : 'Cancel'}
+                </button>
+              )}
             </div>
 
             {details.error && (
