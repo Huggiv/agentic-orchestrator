@@ -1,5 +1,6 @@
 import time
 from threading import Event
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -35,10 +36,12 @@ def test_orchestrate_history_persists_runs(monkeypatch, tmp_path):
         change_plan,
         progress_callback,
         cancellation_token,
+        run_id,
     ):
         assert selected_agent == "SWE"
         assert selected_model is None
         assert cancellation_token is not None
+        assert run_id
         progress_callback({"name": "prepare_branch", "status": "running", "details": base_branch, "timestamp": "2026-06-23T00:00:01+00:00"})
         progress_callback({"name": "prepare_branch", "status": "success", "details": f"feature/{jira_ticket_id.lower()}", "timestamp": "2026-06-23T00:00:03+00:00"})
         return {
@@ -235,6 +238,7 @@ def test_cancel_orchestration_marks_job_cancelled(monkeypatch, tmp_path):
         change_plan,
         progress_callback,
         cancellation_token,
+        run_id,
     ):
         started.set()
         while not cancellation_token.is_cancelled:
@@ -272,3 +276,81 @@ def test_cancel_orchestration_marks_job_cancelled(monkeypatch, tmp_path):
         assert status_payload["status"] == "cancelled"
 
     reset_history_store_for_tests()
+
+
+def test_delete_orchestration_removes_history_and_workspace(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    repo_base.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AGENT_FLOW_REPO_BASE_DIR", str(repo_base))
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    def fake_run_orchestration(
+        jira_ticket_id,
+        repository,
+        base_branch,
+        reviewer,
+        selected_agent,
+        selected_model,
+        commit_message,
+        change_plan,
+        progress_callback,
+        cancellation_token,
+        run_id,
+    ):
+        workspace_dir = repo_base / run_id
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "repo").mkdir(parents=True, exist_ok=True)
+        progress_callback({"name": "prepare_branch", "status": "success", "details": base_branch, "timestamp": "2026-06-23T00:00:01+00:00"})
+        return {
+            "branch_name": f"feature/{jira_ticket_id.lower()}",
+            "pull_request_url": f"https://github.com/{repository}/pull/1",
+            "workspace_dir": str(workspace_dir),
+            "steps": [{"name": "prepare_branch", "status": "success"}],
+            "copilot_notes": [],
+            "usage": {"ai_credits_used": 0.1, "estimated_cost_usd": 0.001},
+        }
+
+    monkeypatch.setattr("app.routers.orchestrate.run_orchestration", fake_run_orchestration)
+
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/api/orchestrate",
+            json={
+                "jira_ticket_id": "AGENT_FLOW-404",
+                "repository": "owner/repo",
+                "base_branch": "development",
+                "reviewer": None,
+                "selected_agent": "SWE",
+                "commit_message": "feat(agent_flow-404): automated implementation",
+                "change_plan": ["Implement", "Test"],
+            },
+        )
+        create_response.raise_for_status()
+        job_id = create_response.json()["job_id"]
+
+        _wait_for_status(client, job_id=job_id, expected="success", timeout_seconds=3.0)
+
+        workspace_dir = repo_base / f"agent_flow-agentic-{job_id[:8]}"
+        assert workspace_dir.exists()
+
+        delete_response = client.delete(f"/api/orchestrate/{job_id}")
+        delete_response.raise_for_status()
+        assert delete_response.json()["deleted"] is True
+
+        status_response = client.get(f"/api/orchestrate/{job_id}")
+        assert status_response.status_code == 404
+        assert not workspace_dir.exists()
+
+    reset_history_store_for_tests()
+
+
+def test_purge_history_endpoint_returns_deleted_count(monkeypatch):
+    monkeypatch.setattr("app.routers.orchestrate.get_history_store", lambda: type("S", (), {"purge_old_jobs": lambda self, days: 4})())
+
+    with TestClient(app) as client:
+        response = client.post("/api/orchestrate/history/purge?days=30")
+        response.raise_for_status()
+        payload = response.json()
+
+    assert payload == {"deleted": 4, "days": 30}

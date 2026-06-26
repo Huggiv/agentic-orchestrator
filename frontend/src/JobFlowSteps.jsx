@@ -22,6 +22,7 @@ const STEP_STATUS_LABELS = {
   success: 'Done',
   skipped: 'Skipped',
   failed: 'Failed',
+  cancelled: 'Cancelled',
   running: 'Running',
   queued: 'Queued',
   idle: 'Idle',
@@ -67,6 +68,18 @@ const collectHistoryStepData = (entry) => {
     }
   }
 
+  if (entry.status === 'cancelled') {
+    let lastStartedKey = null
+    for (const step of FLOW_STEPS) {
+      if (statusMap[step.key] && statusMap[step.key] !== 'idle') {
+        lastStartedKey = step.key
+      }
+    }
+    if (lastStartedKey && statusMap[lastStartedKey] !== 'success' && statusMap[lastStartedKey] !== 'skipped') {
+      statusMap[lastStartedKey] = 'cancelled'
+    }
+  }
+
   return { statusMap, detailsMap }
 }
 
@@ -106,6 +119,22 @@ export function buildLogRows(entry) {
     if (failedKey && normalized[failedKey].status !== 'success' && normalized[failedKey].status !== 'skipped') {
       normalized[failedKey].status = 'failed'
       normalized[failedKey].error = entry.error || null
+    }
+  }
+
+  if (entry.status === 'cancelled') {
+    let cancelledKey = null
+    for (const key of order) {
+      if (normalized[key].status === 'running' || normalized[key].status === 'queued') {
+        cancelledKey = key
+      }
+    }
+    if (!cancelledKey) {
+      cancelledKey = order[order.length - 1] || null
+    }
+    if (cancelledKey && normalized[cancelledKey].status !== 'success' && normalized[cancelledKey].status !== 'skipped') {
+      normalized[cancelledKey].status = 'cancelled'
+      normalized[cancelledKey].error = entry.error || null
     }
   }
 
@@ -165,6 +194,7 @@ export default function JobFlowSteps({ entry, idPrefix = 'flow', onFailedStepCli
 const STATUS_BADGE = {
   success: { bg: '#14532d25', color: '#4ade80', border: '#16a34a50', label: 'success' },
   failed:  { bg: '#450a0a50', color: '#f87171',  border: '#ef4444a0', label: 'failed'  },
+  cancelled: { bg: '#78350f25', color: '#fbbf24', border: '#d9770640', label: 'cancelled' },
   running: { bg: '#1e3a5f40', color: '#60a5fa',  border: '#3b82f640', label: 'running' },
   queued:  { bg: '#1e3a5f40', color: '#60a5fa',  border: '#3b82f640', label: 'queued'  },
   skipped: { bg: '#78350f25', color: '#fbbf24',  border: '#d9770640', label: 'skipped' },

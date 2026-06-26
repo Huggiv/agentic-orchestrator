@@ -213,6 +213,36 @@ export default function App() {
     loadHistory().catch(() => undefined)
   }
 
+  const handleDeleteHistoryEntry = async (entryId) => {
+    if (!window.confirm('Delete this orchestration record and its workspace artifacts?')) return
+    try {
+      const response = await fetch(`/api/orchestrate/${entryId}`, { method: 'DELETE' })
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to delete orchestration record')
+
+      setHistory((prev) => prev.filter((entry) => entry.id !== entryId))
+      setRunningJobs((prev) => prev.filter((job) => job.id !== entryId))
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const handlePurgeHistoryOlderThan30Days = async () => {
+    if (!window.confirm('Delete all orchestration records older than 30 days and their workspace artifacts?')) return
+    try {
+      const response = await fetch('/api/orchestrate/history/purge?days=30', {
+        method: 'POST',
+      })
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to purge old history')
+      await loadHistory()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   const handleChatQueuedJobs = (jobs) => {
     if (!Array.isArray(jobs) || jobs.length === 0) return
     const nextJobs = jobs.map((job) => ({
@@ -564,7 +594,16 @@ export default function App() {
 
       {activeTab === 'history' && (
         <section className="panel">
-          <h2>Orchestration History</h2>
+          <div className="panel-title-row">
+            <h2>Orchestration History</h2>
+            <button
+              type="button"
+              className="history-purge-btn"
+              onClick={handlePurgeHistoryOlderThan30Days}
+            >
+              Purge Older Than 30 Days
+            </button>
+          </div>
 
           <div className="history-filters">
             <label>
@@ -626,6 +665,15 @@ export default function App() {
                         Duration: {formatDurationCompact(entry.result?.usage?.ai?.duration_seconds)}
                       </span>
                       <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
+                      <button
+                        type="button"
+                        className="history-delete-btn"
+                        onClick={() => handleDeleteHistoryEntry(entry.id)}
+                        title="Delete record"
+                        aria-label="Delete orchestration record"
+                      >
+                        x
+                      </button>
                     </div>
                   </div>
                   {entry.status === 'failed' && entry.error && (

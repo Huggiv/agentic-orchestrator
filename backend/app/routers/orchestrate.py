@@ -76,6 +76,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _workspace_dir_for_job(job_id: str) -> str:
+    base_dir = Path(os.environ.get("AGENT_FLOW_REPO_BASE_DIR", "/tmp/agent_flow-tmp-repos"))
+    return str(base_dir / f"agent_flow-agentic-{job_id[:8]}")
+
+
 def _fetch_jira_details(jira_ticket_id: str) -> dict:
     try:
         issue = jira_service.get_issue(jira_ticket_id)
@@ -114,6 +119,7 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             change_plan=payload.change_plan,
             progress_callback=progress_callback,
             cancellation_token=cancel_token,
+            run_id=f"agent_flow-agentic-{job_id[:8]}",
         )
         history_store.set_job_fields(
             job_id,
@@ -157,6 +163,7 @@ def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional
         "commit_message": payload.commit_message,
         "change_plan": payload.change_plan,
         "jira_url": os.environ.get("JIRA_URL"),
+        "workspace_dir": _workspace_dir_for_job(job_id),
         **_fetch_jira_details(payload.jira_ticket_id),
     }
     if request_context:
@@ -188,6 +195,12 @@ def orchestrate_history(
 ):
     items = get_history_store().list_jobs(limit=limit, include_progress=include_progress)
     return {"items": items}
+
+
+@router.post("/orchestrate/history/purge")
+def purge_orchestrate_history(days: int = Query(default=30, ge=1, le=3650)):
+    deleted = get_history_store().purge_old_jobs(days=days)
+    return {"deleted": deleted, "days": days}
 
 
 @router.get("/agents")
@@ -237,3 +250,18 @@ def cancel_orchestration(job_id: str):
         },
     )
     return {"job_id": job_id, "status": "cancelling", "cancelled": True}
+
+
+@router.delete("/orchestrate/{job_id}")
+def delete_orchestration(job_id: str):
+    history_store = get_history_store()
+    job = history_store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Orchestration job not found")
+
+    status = str(job.get("status") or "")
+    if status in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Cannot delete a running job. Cancel it first.")
+
+    deleted = history_store.delete_job(job_id)
+    return {"job_id": job_id, "deleted": bool(deleted)}

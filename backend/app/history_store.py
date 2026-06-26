@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,7 +21,34 @@ class HistoryStore:
         self._lock = Lock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._repo_base_dir = Path(os.environ.get("AGENT_FLOW_REPO_BASE_DIR", "/tmp/agent_flow-tmp-repos")).resolve()
         self._init_schema()
+
+    def _extract_cleanup_paths(self, request_json: str | None, result_json: str | None) -> list[Path]:
+        paths: set[Path] = set()
+        payloads = [self._from_json(request_json), self._from_json(result_json)]
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            workspace = payload.get("workspace_dir")
+            if isinstance(workspace, str) and workspace.strip():
+                try:
+                    paths.add(Path(workspace).resolve())
+                except OSError:
+                    continue
+        return sorted(paths)
+
+    def _safe_cleanup_paths(self, paths: list[Path]) -> None:
+        for path in paths:
+            try:
+                if not path.is_absolute():
+                    continue
+                if not str(path).startswith(str(self._repo_base_dir)):
+                    continue
+                if path.exists() and path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                continue
 
     @staticmethod
     def _retention_cutoff_iso(days: int = 30) -> str:
@@ -31,7 +59,7 @@ class HistoryStore:
         cutoff = self._retention_cutoff_iso(days)
         old_job_rows = self._conn.execute(
             """
-            SELECT id
+            SELECT id, request_json, result_json
             FROM orchestration_jobs
             WHERE created_at < ?
             """,
@@ -41,6 +69,9 @@ class HistoryStore:
             return 0
 
         job_ids = [row["id"] for row in old_job_rows]
+        cleanup_paths: list[Path] = []
+        for row in old_job_rows:
+            cleanup_paths.extend(self._extract_cleanup_paths(row["request_json"], row["result_json"]))
         placeholders = ",".join("?" for _ in job_ids)
         self._conn.execute(
             f"DELETE FROM orchestration_progress WHERE job_id IN ({placeholders})",
@@ -50,6 +81,7 @@ class HistoryStore:
             f"DELETE FROM orchestration_jobs WHERE id IN ({placeholders})",
             job_ids,
         )
+        self._safe_cleanup_paths(cleanup_paths)
         return len(job_ids)
 
     def purge_old_jobs(self, days: int = 30) -> int:
@@ -58,6 +90,22 @@ class HistoryStore:
             if deleted:
                 self._conn.commit()
             return deleted
+
+    def delete_job(self, job_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, request_json, result_json FROM orchestration_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return False
+
+            cleanup_paths = self._extract_cleanup_paths(row["request_json"], row["result_json"])
+            self._conn.execute("DELETE FROM orchestration_progress WHERE job_id = ?", (job_id,))
+            self._conn.execute("DELETE FROM orchestration_jobs WHERE id = ?", (job_id,))
+            self._safe_cleanup_paths(cleanup_paths)
+            self._conn.commit()
+            return True
 
     def _init_schema(self) -> None:
         with self._lock:

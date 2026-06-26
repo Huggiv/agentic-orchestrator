@@ -1,5 +1,6 @@
 from app.history_store import HistoryStore
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 def test_history_store_persists_job_and_progress(tmp_path):
@@ -102,4 +103,35 @@ def test_history_store_purges_jobs_older_than_30_days(tmp_path):
     all_jobs = store.list_jobs(limit=10, include_progress=True)
     assert [job["id"] for job in all_jobs] == ["job-fresh"]
 
+    store.close()
+
+
+def test_history_store_delete_job_removes_workspace_dir(tmp_path):
+    db_path = tmp_path / "history.db"
+    repo_base = tmp_path / "repos"
+    repo_base.mkdir(parents=True)
+    workspace_dir = repo_base / "agent_flow-agentic-job123"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "repo").mkdir(parents=True)
+
+    store = HistoryStore(db_path=str(db_path))
+    store._repo_base_dir = repo_base.resolve()  # align test repo base with temp dir
+
+    job_id = "job-delete-1"
+    store.create_job(
+        job_id=job_id,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        request_payload={
+            "jira_ticket_id": "AGENT_FLOW-DEL",
+            "repository": "owner/repo",
+            "base_branch": "development",
+            "workspace_dir": str(workspace_dir),
+        },
+    )
+
+    assert workspace_dir.exists()
+    deleted = store.delete_job(job_id)
+    assert deleted is True
+    assert store.get_job(job_id) is None
+    assert not workspace_dir.exists()
     store.close()

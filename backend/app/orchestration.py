@@ -644,6 +644,7 @@ def run_orchestration(
     selected_model: str | None = None,
     progress_callback: Callable[[dict], None] | None = None,
     cancellation_token: CancellationToken | None = None,
+    run_id: str | None = None,
 ) -> dict:
     if cancellation_token:
         cancellation_token.throw_if_cancelled()
@@ -658,7 +659,7 @@ def run_orchestration(
     copilot_session_ids: list[str] = []
     repo_instructions = []
 
-    run_id = f"agent_flow-agentic-{uuid.uuid4().hex[:8]}"
+    run_id = run_id or f"agent_flow-agentic-{uuid.uuid4().hex[:8]}"
     _REPO_BASE_DIR.mkdir(parents=True, exist_ok=True)
     temp_dir = str(_REPO_BASE_DIR / run_id)
     os.makedirs(temp_dir, exist_ok=True)
@@ -729,6 +730,8 @@ def run_orchestration(
     steps.append(StepResult(name="create_and_checkout_branch", status="success", details=branch_name))
 
     _emit_progress(progress_callback, "read_jira", "running", jira_ticket_id)
+    if cancellation_token:
+        cancellation_token.throw_if_cancelled()
     issue = jira_service.get_issue(jira_ticket_id)
     summary = issue.get("summary", "")
     description = issue.get("description") or ""
@@ -907,6 +910,8 @@ def run_orchestration(
     steps.append(StepResult(name="push_branch", status="success", details=branch_name))
 
     _emit_progress(progress_callback, "create_pr", "running")
+    if cancellation_token:
+        cancellation_token.throw_if_cancelled()
     pr_title = f"{jira_ticket_id}: {commit_message}"
     pr_body = "Automated agentic flow execution via backend orchestration."
     headers = {
@@ -957,6 +962,7 @@ def run_orchestration(
     return {
         "branch_name": branch_name,
         "pull_request_url": pr_url,
+        "workspace_dir": temp_dir,
         "steps": [s.__dict__ for s in steps],
         "selected_agent": selected_agent,
         "copilot_notes": copilot_notes,
