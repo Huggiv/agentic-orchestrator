@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-const initialAssistantMessage = {
-  id: 'assistant-initial',
+const CHAT_STORAGE_KEY = 'agentflow.chat.sessions.v1'
+const MAX_CHAT_SESSIONS = 5
+
+const createInitialAssistantMessage = () => ({
+  id: `assistant-initial-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   role: 'assistant',
+  kind: 'text',
+  createdAt: Date.now(),
   content:
     'I can run one or more Jira-driven workflows from chat. Include ticket keys like AGENT_FLOW-101 and your grooming guidance in one prompt.',
-}
+})
+
+const createSession = () => ({
+  id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  title: 'New Chat',
+  updatedAt: Date.now(),
+  messages: [createInitialAssistantMessage()],
+})
 
 const parseApiPayload = (raw) => {
   if (!raw) return {}
@@ -29,44 +41,144 @@ export default function ChatConsole({
   availableModels,
   onJobsQueued,
 }) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [sessions, setSessions] = useState([])
+  const [activeSessionId, setActiveSessionId] = useState('')
   const [draft, setDraft] = useState('')
-  const [messages, setMessages] = useState([initialAssistantMessage])
   const [isSending, setIsSending] = useState(false)
   const [isConfirming, setIsConfirming] = useState(false)
   const [chatError, setChatError] = useState('')
   const [streamStatus, setStreamStatus] = useState('')
   const [streamPhases, setStreamPhases] = useState([])
-  const [pendingPlan, setPendingPlan] = useState(null)
   const listRef = useRef(null)
 
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId) || null,
+    [sessions, activeSessionId]
+  )
+
+  const messages = activeSession?.messages || []
+
+  const orderedMessages = useMemo(
+    () => [...messages].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
+    [messages]
+  )
+
   const canSend = useMemo(() => {
-    return Boolean(draft.trim()) && Boolean(repository.trim()) && !isSending && !isConfirming
-  }, [draft, repository, isSending, isConfirming])
+    return Boolean(draft.trim()) && Boolean(repository.trim()) && !isSending && !isConfirming && Boolean(activeSessionId)
+  }, [draft, repository, isSending, isConfirming, activeSessionId])
+
+  const persistSessions = (nextSessions, nextActiveSessionId) => {
+    const limited = [...nextSessions]
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, MAX_CHAT_SESSIONS)
+    setSessions(limited)
+
+    const effectiveActiveId = limited.some((session) => session.id === nextActiveSessionId)
+      ? nextActiveSessionId
+      : (limited[0]?.id || '')
+    setActiveSessionId(effectiveActiveId)
+
+    try {
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(limited))
+    } catch {
+      return
+    }
+  }
+
+  const updateActiveSession = (updater) => {
+    setSessions((prev) => {
+      const next = prev.map((session) => {
+        if (session.id !== activeSessionId) return session
+        const updated = updater(session)
+        const firstUserMessage = updated.messages.find((item) => item.role === 'user')
+        return {
+          ...updated,
+          updatedAt: Date.now(),
+          title: firstUserMessage ? firstUserMessage.content.slice(0, 40) : (updated.title || 'New Chat'),
+        }
+      })
+      try {
+        localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(next.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, MAX_CHAT_SESSIONS)))
+      } catch {
+        return next
+      }
+      return next
+    })
+  }
+
+  const createNewSession = () => {
+    const session = createSession()
+    persistSessions([session, ...sessions], session.id)
+    setDraft('')
+    setStreamStatus('')
+    setStreamPhases([])
+    setChatError('')
+  }
+
+  const deleteSession = (sessionId) => {
+    const next = sessions.filter((session) => session.id !== sessionId)
+    if (next.length === 0) {
+      const replacement = createSession()
+      persistSessions([replacement], replacement.id)
+      return
+    }
+    const nextActive = sessionId === activeSessionId ? next[0].id : activeSessionId
+    persistSessions(next, nextActive)
+  }
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CHAT_STORAGE_KEY)
+      if (!raw) {
+        const fresh = createSession()
+        setSessions([fresh])
+        setActiveSessionId(fresh.id)
+        return
+      }
+      const parsed = JSON.parse(raw)
+      const loaded = Array.isArray(parsed) ? parsed.slice(0, MAX_CHAT_SESSIONS) : []
+      if (loaded.length === 0) {
+        const fresh = createSession()
+        setSessions([fresh])
+        setActiveSessionId(fresh.id)
+        return
+      }
+      setSessions(loaded)
+      setActiveSessionId(loaded[0].id)
+    } catch {
+      const fresh = createSession()
+      setSessions([fresh])
+      setActiveSessionId(fresh.id)
+    }
+  }, [])
 
   useEffect(() => {
     if (!listRef.current) return
     listRef.current.scrollTop = listRef.current.scrollHeight
-  }, [messages])
+  }, [orderedMessages, streamStatus])
 
   const appendAssistantDelta = (assistantId, delta) => {
     if (!delta) return
-    setMessages((prev) =>
-      prev.map((message) =>
+    updateActiveSession((session) => ({
+      ...session,
+      messages: session.messages.map((message) =>
         message.id === assistantId
           ? { ...message, content: `${message.content || ''}${delta}` }
           : message
-      )
-    )
+      ),
+    }))
   }
 
   const setAssistantText = (assistantId, text) => {
-    setMessages((prev) =>
-      prev.map((message) =>
+    updateActiveSession((session) => ({
+      ...session,
+      messages: session.messages.map((message) =>
         message.id === assistantId
           ? { ...message, content: text || '' }
           : message
-      )
-    )
+      ),
+    }))
   }
 
   const addPhase = (label) => {
@@ -173,13 +285,18 @@ export default function ChatConsole({
     setStreamStatus('Connecting...')
     setStreamPhases([{ id: `phase-${Date.now()}`, label: 'Connecting...' }])
     setIsSending(true)
+
     const userId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const assistantId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    setMessages((prev) => [
-      ...prev,
-      { id: userId, role: 'user', content: userMessage },
-      { id: assistantId, role: 'assistant', content: '' },
-    ])
+
+    updateActiveSession((session) => ({
+      ...session,
+      messages: [
+        ...session.messages,
+        { id: userId, role: 'user', kind: 'text', createdAt: Date.now(), content: userMessage },
+        { id: assistantId, role: 'assistant', kind: 'text', createdAt: Date.now(), content: '' },
+      ],
+    }))
 
     try {
       const response = await fetch('/api/chat/message/stream', {
@@ -206,15 +323,28 @@ export default function ChatConsole({
       if (queuedJobs.length > 0) {
         onJobsQueued(queuedJobs)
       }
+
       if (data?.requires_confirmation && data?.plan_id) {
-        setPendingPlan({
-          id: data.plan_id,
-          groomedIssue: data.groomed_issue || '',
-          tickets: Array.isArray(data.tickets) ? data.tickets : [],
-        })
-      } else {
-        setPendingPlan(null)
+        const confirmId = `confirm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        updateActiveSession((session) => ({
+          ...session,
+          messages: [
+            ...session.messages,
+            {
+              id: confirmId,
+              role: 'assistant',
+              kind: 'confirmation',
+              createdAt: Date.now(),
+              resolved: false,
+              content: 'Review this groomed issue and confirm workflow trigger.',
+              planId: data.plan_id,
+              tickets: Array.isArray(data.tickets) ? data.tickets : [],
+              groomedIssue: data.groomed_issue || '',
+            },
+          ],
+        }))
       }
+
       if ((data?.assistant_message || '').trim()) {
         setAssistantText(assistantId, data.assistant_message)
       } else {
@@ -224,22 +354,24 @@ export default function ChatConsole({
       setChatError(err.message)
       addPhase('Request failed')
       setStreamStatus('')
-      setMessages((prev) => {
-        const next = [...prev]
+      updateActiveSession((session) => {
+        const next = [...session.messages]
         const idx = next.findIndex((message) => message.id === assistantId)
         if (idx >= 0) {
           next[idx] = {
             ...next[idx],
             content: 'I could not process that prompt. Please verify ticket keys and try again.',
           }
-          return next
+          return { ...session, messages: next }
         }
         next.push({
           id: `assistant-error-${Date.now()}`,
           role: 'assistant',
+          kind: 'text',
+          createdAt: Date.now(),
           content: 'I could not process that prompt. Please verify ticket keys and try again.',
         })
-        return next
+        return { ...session, messages: next }
       })
     } finally {
       setStreamStatus('')
@@ -247,18 +379,43 @@ export default function ChatConsole({
     }
   }
 
-  const confirmPlan = async (confirm) => {
-    if (!pendingPlan?.id) return
+  const confirmPlan = async (planId, confirm, messageId) => {
+    if (!planId) return
 
     setIsConfirming(true)
     setChatError('')
+
     const assistantId = `assistant-confirm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    setMessages((prev) => [...prev, { id: assistantId, role: 'assistant', content: '' }])
+    const userDecisionId = `user-decision-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    updateActiveSession((session) => ({
+      ...session,
+      messages: [
+        ...session.messages.map((message) =>
+          message.id === messageId ? { ...message, resolved: true } : message
+        ),
+        {
+          id: userDecisionId,
+          role: 'user',
+          kind: 'text',
+          createdAt: Date.now(),
+          content: confirm ? 'Confirm and trigger workflow' : 'Cancel this workflow request',
+        },
+        {
+          id: assistantId,
+          role: 'assistant',
+          kind: 'text',
+          createdAt: Date.now(),
+          content: '',
+        },
+      ],
+    }))
+
     try {
       const response = await fetch('/api/chat/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan_id: pendingPlan.id, confirm }),
+        body: JSON.stringify({ plan_id: planId, confirm }),
       })
       const raw = await response.text()
       const data = parseApiPayload(raw)
@@ -272,7 +429,6 @@ export default function ChatConsole({
       }
 
       setAssistantText(assistantId, data.assistant_message || (confirm ? 'Confirmed.' : 'Cancelled.'))
-      setPendingPlan(null)
     } catch (err) {
       setChatError(err.message)
       setAssistantText(assistantId, 'I could not process your confirmation right now.')
@@ -281,102 +437,150 @@ export default function ChatConsole({
     }
   }
 
+  if (!isOpen) {
+    return (
+      <div className="chat-fab-shell chat-fab-shell--launcher">
+        <button type="button" className="chat-fab-launcher" onClick={() => setIsOpen(true)}>
+          🤖
+        </button>
+      </div>
+    )
+  }
+
   return (
-    <section className="panel chat-panel">
-      <div className="chat-settings">
-        <label>
-          Repository
-          <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
-        </label>
-
-        <label>
-          Agent
-          <select value={selectedAgent} onChange={(e) => setSelectedAgent(e.target.value)}>
-            {availableAgents.map((agent) => (
-              <option key={agent} value={agent}>{agent}</option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          Model
-          <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-            <option value="">Auto</option>
-            {availableModels.map((model) => (
-              <option key={model.id} value={model.id}>{model.name}</option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          Reviewer
-          <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="teammate-name" />
-        </label>
-      </div>
-
-      <div className="chat-thread" ref={listRef}>
-        {isSending && streamStatus && (
-          <article className="chat-message chat-message--assistant chat-message--typing">
-            <header>Copilot</header>
-            <p>{streamStatus}</p>
-          </article>
-        )}
-        {messages.map((message, idx) => (
-          <article
-            key={`${message.role}-${idx}`}
-            className={`chat-message chat-message--${message.role}`}
-          >
-            <header>{message.role === 'assistant' ? 'Copilot' : 'You'}</header>
-            <p>{message.content}</p>
-          </article>
-        ))}
-      </div>
-
-      <form className="chat-composer" onSubmit={sendMessage}>
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="Example: Run AGENT_FLOW-101 and AGENT_FLOW-102. Focus on robust error handling and add tests."
-          rows={4}
-        />
-        <div className="chat-actions">
-          <small>Use Shift+Enter for a new line. Include one or more Jira tickets in the prompt.</small>
-          <button type="submit" disabled={!canSend}>{isSending ? 'Sending...' : 'Send'}</button>
-        </div>
-      </form>
-
-      {pendingPlan && (
-        <section className="chat-confirm-panel">
-          <strong>Groomed issue ready for confirmation</strong>
-          <p>
-            Tickets: {pendingPlan.tickets.join(', ')}
-          </p>
-          <pre>{pendingPlan.groomedIssue || 'No groomed issue text available.'}</pre>
-          <div className="chat-confirm-actions">
-            <button type="button" onClick={() => confirmPlan(true)} disabled={isConfirming}>
-              {isConfirming ? 'Processing...' : 'Confirm and Trigger Workflow'}
-            </button>
-            <button type="button" onClick={() => confirmPlan(false)} disabled={isConfirming} className="chat-confirm-cancel">
-              Cancel
-            </button>
+    <div className="chat-fab-shell">
+      <section className="panel chat-panel chat-panel--floating">
+        <div className="chat-header">
+          <strong>Copilot Chat</strong>
+          <div className="chat-header-actions">
+            <button type="button" onClick={createNewSession}>New</button>
+            <button type="button" onClick={() => setIsOpen(false)}>Minimize</button>
           </div>
-        </section>
-      )}
+        </div>
 
-      {streamPhases.length > 0 && (
-        <section className="chat-phases" aria-live="polite">
-          <strong>{isSending ? 'Live phase timeline' : 'Latest run timeline'}</strong>
-          <ol>
-            {streamPhases.map((phase, idx) => (
-              <li key={phase.id} className={idx === streamPhases.length - 1 && isSending ? 'chat-phase--active' : ''}>
-                {phase.label}
-              </li>
-            ))}
-          </ol>
-        </section>
-      )}
+        <div className="chat-settings chat-settings--top">
+          <label>
+            Repository
+            <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
+          </label>
 
-      {chatError && <p className="chat-error">{chatError}</p>}
-    </section>
+          <label>
+            Reviewer
+            <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="teammate-name" />
+          </label>
+        </div>
+
+        <div className="chat-layout">
+          <aside className="chat-sessions">
+            <h4>Recent Chats</h4>
+            {sessions.map((session) => (
+              <div key={session.id} className={`chat-session-row${session.id === activeSessionId ? ' chat-session-row--active' : ''}`}>
+                <button
+                  type="button"
+                  className="chat-session-item"
+                  onClick={() => setActiveSessionId(session.id)}
+                >
+                  <span>{session.title || 'Chat'}</span>
+                </button>
+                <button
+                  type="button"
+                  className="chat-session-delete"
+                  onClick={() => deleteSession(session.id)}
+                  title="Delete chat"
+                >
+                  x
+                 </button>
+               </div>
+             ))}
+           </aside>
+
+          <div className="chat-main">
+            <div className="chat-thread" ref={listRef}>
+              {orderedMessages.map((message) => (
+                <article
+                  key={message.id}
+                  className={`chat-message chat-message--${message.role}`}
+                >
+                  <header>{message.role === 'assistant' ? 'Copilot' : 'You'}</header>
+                  <p>{message.content}</p>
+
+                  {message.kind === 'confirmation' && !message.resolved && (
+                    <div className="chat-inline-confirm">
+                      <p><strong>Tickets:</strong> {(message.tickets || []).join(', ')}</p>
+                      <pre>{message.groomedIssue || 'No groomed issue text available.'}</pre>
+                      <div className="chat-confirm-actions">
+                        <button
+                          type="button"
+                          onClick={() => confirmPlan(message.planId, true, message.id)}
+                          disabled={isConfirming}
+                        >
+                          {isConfirming ? 'Processing...' : 'Confirm and Trigger Workflow'}
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-confirm-cancel"
+                          onClick={() => confirmPlan(message.planId, false, message.id)}
+                          disabled={isConfirming}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </article>
+              ))}
+
+              {isSending && streamStatus && (
+                <article className="chat-message chat-message--assistant chat-message--typing">
+                  <header>Copilot</header>
+                  <p>{streamStatus}</p>
+                </article>
+              )}
+            </div>
+
+            <form className="chat-composer chat-composer--floating" onSubmit={sendMessage}>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="Ask to groom Jira issues or trigger workflow with confirmation..."
+                rows={4}
+              />
+
+              <div className="chat-composer-corner">
+                <select value={selectedAgent} onChange={(e) => setSelectedAgent(e.target.value)}>
+                  {availableAgents.map((agent) => (
+                    <option key={agent} value={agent}>{agent}</option>
+                  ))}
+                </select>
+                <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+                  <option value="">Auto</option>
+                  {availableModels.map((model) => (
+                    <option key={model.id} value={model.id}>{model.name}</option>
+                  ))}
+                </select>
+                <button type="submit" disabled={!canSend}>
+                  {isSending ? 'Sending...' : 'Send'}
+                </button>
+              </div>
+            </form>
+
+            {streamPhases.length > 0 && (
+              <section className="chat-phases" aria-live="polite">
+                <strong>{isSending ? 'Live phase timeline' : 'Latest run timeline'}</strong>
+                <ol>
+                  {streamPhases.map((phase, idx) => (
+                    <li key={phase.id} className={idx === streamPhases.length - 1 && isSending ? 'chat-phase--active' : ''}>
+                      {phase.label}
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            )}
+
+            {chatError && <p className="chat-error">{chatError}</p>}
+          </div>
+        </div>
+      </section>
+    </div>
   )
 }

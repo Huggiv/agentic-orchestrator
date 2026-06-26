@@ -131,6 +131,11 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState('idle')
   const [progress, setProgress] = useState([])
   const [error, setError] = useState('')
+  const [jqlQuery, setJqlQuery] = useState('')
+  const [jqlIssues, setJqlIssues] = useState([])
+  const [jqlLoading, setJqlLoading] = useState(false)
+  const [jqlError, setJqlError] = useState('')
+  const [selectedJiraTickets, setSelectedJiraTickets] = useState([])
   const [history, setHistory] = useState([])
   const [runningJobs, setRunningJobs] = useState([])
   const [activeTab, setActiveTab] = useState('run')
@@ -259,6 +264,107 @@ export default function App() {
     })
     loadHistory().catch(() => undefined)
     setActiveTab('executing')
+  }
+
+  const runTicketWorkflow = async (jiraTicketId) => {
+    const response = await fetch('/api/orchestrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jira_ticket_id: jiraTicketId,
+        selected_agent: selectedAgent,
+        selected_model: selectedModel || null,
+        repository,
+        base_branch: 'development',
+        reviewer: reviewer || null,
+        commit_message: `feat(${jiraTicketId.toLowerCase()}): automated implementation`,
+        change_plan: defaultPlan,
+      }),
+    })
+
+    const raw = await response.text()
+    const data = parseApiPayload(raw)
+    if (!response.ok) throw new Error(data.detail || `Failed to trigger ${jiraTicketId}`)
+    if (!data.job_id) throw new Error(`Missing job id for ${jiraTicketId}`)
+
+    return {
+      id: data.job_id,
+      jira_ticket_id: jiraTicketId,
+      repository,
+      selected_agent: selectedAgent,
+      selected_model: selectedModel || null,
+    }
+  }
+
+  const searchJiraByJql = async (event) => {
+    event.preventDefault()
+    setJqlError('')
+    setJqlLoading(true)
+    try {
+      const queryParam = encodeURIComponent(jqlQuery.trim())
+      const response = await fetch(`/api/jira/issues?max_results=50&jql=${queryParam}`)
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to search Jira issues')
+
+      const issues = Array.isArray(data.issues) ? data.issues : []
+      setJqlIssues(issues)
+      setSelectedJiraTickets([])
+    } catch (err) {
+      setJqlError(err.message)
+      setJqlIssues([])
+      setSelectedJiraTickets([])
+    } finally {
+      setJqlLoading(false)
+    }
+  }
+
+  const toggleJiraSelection = (ticketId) => {
+    setSelectedJiraTickets((prev) =>
+      prev.includes(ticketId)
+        ? prev.filter((item) => item !== ticketId)
+        : [...prev, ticketId]
+    )
+  }
+
+  const selectAllJiraTickets = () => {
+    setSelectedJiraTickets(jqlIssues.map((issue) => issue.key))
+  }
+
+  const clearAllJiraTickets = () => {
+    setSelectedJiraTickets([])
+  }
+
+  const runSelectedJiraWorkflows = async () => {
+    if (selectedJiraTickets.length === 0) {
+      setJqlError('Select at least one Jira ticket.')
+      return
+    }
+    setJqlError('')
+    setJobStatus('queued')
+    try {
+      const jobs = await Promise.all(selectedJiraTickets.map((ticketId) => runTicketWorkflow(ticketId)))
+      setRunningJobs((prev) => {
+        const byId = new Map(prev.map((item) => [item.id, item]))
+        jobs.forEach((item) => byId.set(item.id, item))
+        return Array.from(byId.values())
+      })
+      setActiveTab('executing')
+      setJobStatus('idle')
+      setSelectedJiraTickets([])
+    } catch (err) {
+      setJobStatus('failed')
+      setJqlError(err.message)
+    }
+  }
+
+  const getIssueTitle = (issue) => issue.summary || issue.jira_summary || issue.title || '-'
+  const getIssueStatus = (issue) => {
+    const status = issue.status
+    if (!status) return '-'
+    if (typeof status === 'string') return status
+    if (typeof status.name === 'string') return status.name
+    return String(status)
   }
 
   // Jira ticket ID validation: must match pattern like PROJ-123
@@ -427,12 +533,6 @@ export default function App() {
             Run
           </button>
           <button
-            className={`topnav-tab${activeTab === 'chat' ? ' topnav-tab--active' : ''}`}
-            onClick={() => setActiveTab('chat')}
-          >
-            Chat
-          </button>
-          <button
             className={`topnav-tab${activeTab === 'executing' ? ' topnav-tab--active' : ''}`}
             onClick={() => setActiveTab('executing')}
           >
@@ -518,6 +618,75 @@ export default function App() {
               </form>
             </CollapsiblePanel>
 
+            <CollapsiblePanel
+              id="jira-search"
+              title="Search Jira and Bulk Trigger"
+              defaultExpanded={true}
+              expandedPanels={expandedPanels}
+              togglePanel={togglePanel}
+            >
+              <form onSubmit={searchJiraByJql} className="jira-search-form">
+                <label>
+                  JQL Query
+                  <input
+                    value={jqlQuery}
+                    onChange={(e) => setJqlQuery(e.target.value)}
+                    placeholder="project = DEMO AND status != DONE ORDER BY updated DESC"
+                  />
+                </label>
+                <button type="submit" disabled={jqlLoading}>
+                  {jqlLoading ? 'Searching...' : 'Search Jira'}
+                </button>
+                <button type="button" onClick={runSelectedJiraWorkflows} disabled={selectedJiraTickets.length === 0}>
+                  Run Selected ({selectedJiraTickets.length})
+                </button>
+              </form>
+
+              {jqlIssues.length > 0 && (
+                <div className="jira-selection-actions">
+                  <button type="button" onClick={selectAllJiraTickets}>
+                    Select All
+                  </button>
+                  <button type="button" onClick={clearAllJiraTickets}>
+                    Clear All
+                  </button>
+                </div>
+              )}
+
+              {jqlError && <p className="jira-search-error">{jqlError}</p>}
+
+              {jqlIssues.length > 0 && (
+                <div className="jira-results-table-wrap">
+                  <table className="jira-results-table">
+                    <thead>
+                      <tr>
+                        <th>Select</th>
+                        <th>Jira ID</th>
+                        <th>Title</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jqlIssues.map((issue) => (
+                        <tr key={issue.key}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={selectedJiraTickets.includes(issue.key)}
+                              onChange={() => toggleJiraSelection(issue.key)}
+                            />
+                          </td>
+                          <td>{issue.key}</td>
+                          <td>{getIssueTitle(issue)}</td>
+                          <td>{getIssueStatus(issue)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CollapsiblePanel>
+
             {error && <section className="panel error">{error}</section>}
 
             {result && (
@@ -574,22 +743,6 @@ export default function App() {
         <section className="panel">
           <ExecutingJobs runningJobs={runningJobs} onJobComplete={handleJobComplete} />
         </section>
-      )}
-
-      {activeTab === 'chat' && (
-        <ChatConsole
-          repository={repository}
-          setRepository={setRepository}
-          reviewer={reviewer}
-          setReviewer={setReviewer}
-          selectedAgent={selectedAgent}
-          setSelectedAgent={setSelectedAgent}
-          selectedModel={selectedModel}
-          setSelectedModel={setSelectedModel}
-          availableAgents={availableAgents}
-          availableModels={availableModels}
-          onJobsQueued={handleChatQueuedJobs}
-        />
       )}
 
       {activeTab === 'history' && (
@@ -796,6 +949,20 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <ChatConsole
+        repository={repository}
+        setRepository={setRepository}
+        reviewer={reviewer}
+        setReviewer={setReviewer}
+        selectedAgent={selectedAgent}
+        setSelectedAgent={setSelectedAgent}
+        selectedModel={selectedModel}
+        setSelectedModel={setSelectedModel}
+        availableAgents={availableAgents}
+        availableModels={availableModels}
+        onJobsQueued={handleChatQueuedJobs}
+      />
 
       {/* Footer */}
       <footer className="app-footer">

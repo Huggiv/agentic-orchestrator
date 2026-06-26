@@ -33,9 +33,9 @@ def _format_issue(raw_issue: dict, filters_cfg: dict) -> dict:
 
 
 def get_issues(jql: Optional[str] = None, max_results: int = 25) -> list[dict]:
-    """Fetch Jira issues matching *jql* (defaults to AGENT_FLOW issues excluding DONE)."""
+    """Fetch Jira issues matching *jql* (defaults to global recent updates)."""
     client = get_client()
-    effective_jql = jql or 'project = "AGENT_FLOW" AND status != "DONE" ORDER BY updated DESC'
+    effective_jql = jql or 'ORDER BY updated DESC'
     issues = client.search_issues(effective_jql, maxResults=max_results)
     filters_cfg = _load_filters()
     return [_format_issue(i.raw, filters_cfg) for i in issues]
