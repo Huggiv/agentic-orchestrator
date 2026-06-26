@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 const CHAT_STORAGE_KEY = 'agentflow.chat.sessions.v1'
+const CHAT_LAUNCHER_POS_KEY = 'agentflow.chat.launcher.position.v1'
 const MAX_CHAT_SESSIONS = 5
 
 const createInitialAssistantMessage = () => ({
@@ -42,6 +43,8 @@ export default function ChatConsole({
   onJobsQueued,
 }) {
   const [isOpen, setIsOpen] = useState(false)
+  const [launcherPosition, setLauncherPosition] = useState(null)
+  const dragRef = useRef({ dragging: false, offsetX: 0, offsetY: 0 })
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState('')
   const [draft, setDraft] = useState('')
@@ -152,6 +155,59 @@ export default function ChatConsole({
       setActiveSessionId(fresh.id)
     }
   }, [])
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CHAT_LAUNCHER_POS_KEY)
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      if (typeof parsed?.x === 'number' && typeof parsed?.y === 'number') {
+        setLauncherPosition({ x: parsed.x, y: parsed.y })
+      }
+    } catch {
+      return
+    }
+  }, [])
+
+  const persistLauncherPosition = (position) => {
+    setLauncherPosition(position)
+    try {
+      localStorage.setItem(CHAT_LAUNCHER_POS_KEY, JSON.stringify(position))
+    } catch {
+      return
+    }
+  }
+
+  const bindDragHandlers = () => {
+    const onPointerMove = (event) => {
+      if (!dragRef.current.dragging) return
+      const x = event.clientX - dragRef.current.offsetX
+      const y = event.clientY - dragRef.current.offsetY
+      const maxX = Math.max(0, window.innerWidth - 60)
+      const maxY = Math.max(0, window.innerHeight - 60)
+      persistLauncherPosition({
+        x: Math.min(maxX, Math.max(0, x)),
+        y: Math.min(maxY, Math.max(0, y)),
+      })
+    }
+
+    const onPointerUp = () => {
+      dragRef.current.dragging = false
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+  }
+
+  const startLauncherDrag = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    dragRef.current.dragging = true
+    dragRef.current.offsetX = event.clientX - rect.left
+    dragRef.current.offsetY = event.clientY - rect.top
+    bindDragHandlers()
+  }
 
   useEffect(() => {
     if (!listRef.current) return
@@ -439,8 +495,17 @@ export default function ChatConsole({
 
   if (!isOpen) {
     return (
-      <div className="chat-fab-shell chat-fab-shell--launcher">
-        <button type="button" className="chat-fab-launcher" onClick={() => setIsOpen(true)}>
+      <div
+        className="chat-fab-shell chat-fab-shell--launcher"
+        style={launcherPosition ? { left: `${launcherPosition.x}px`, top: `${launcherPosition.y}px`, right: 'auto', bottom: 'auto', transform: 'none' } : undefined}
+      >
+        <button
+          type="button"
+          className="chat-fab-launcher"
+          onPointerDown={startLauncherDrag}
+          onDoubleClick={() => setIsOpen(true)}
+          title="Drag to move. Double-click to open."
+        >
           🤖
         </button>
       </div>

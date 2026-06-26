@@ -136,6 +136,9 @@ export default function App() {
   const [jqlLoading, setJqlLoading] = useState(false)
   const [jqlError, setJqlError] = useState('')
   const [selectedJiraTickets, setSelectedJiraTickets] = useState([])
+  const [bulkPopupOpen, setBulkPopupOpen] = useState(false)
+  const [bulkTicketConfigs, setBulkTicketConfigs] = useState([])
+  const [bulkSubmitting, setBulkSubmitting] = useState(false)
   const [history, setHistory] = useState([])
   const [runningJobs, setRunningJobs] = useState([])
   const [activeTab, setActiveTab] = useState('run')
@@ -266,17 +269,17 @@ export default function App() {
     setActiveTab('executing')
   }
 
-  const runTicketWorkflow = async (jiraTicketId) => {
+  const runTicketWorkflow = async (jiraTicketId, config = {}) => {
     const response = await fetch('/api/orchestrate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         jira_ticket_id: jiraTicketId,
-        selected_agent: selectedAgent,
-        selected_model: selectedModel || null,
-        repository,
+        selected_agent: config.selectedAgent || selectedAgent,
+        selected_model: (config.selectedModel ?? selectedModel) || null,
+        repository: config.repository || repository,
         base_branch: 'development',
-        reviewer: reviewer || null,
+        reviewer: config.reviewer || reviewer || null,
         commit_message: `feat(${jiraTicketId.toLowerCase()}): automated implementation`,
         change_plan: defaultPlan,
       }),
@@ -290,9 +293,9 @@ export default function App() {
     return {
       id: data.job_id,
       jira_ticket_id: jiraTicketId,
-      repository,
-      selected_agent: selectedAgent,
-      selected_model: selectedModel || null,
+      repository: config.repository || repository,
+      selected_agent: config.selectedAgent || selectedAgent,
+      selected_model: (config.selectedModel ?? selectedModel) || null,
     }
   }
 
@@ -341,20 +344,62 @@ export default function App() {
       return
     }
     setJqlError('')
+    setBulkTicketConfigs(
+      selectedJiraTickets.map((ticketId) => ({
+        ticketId,
+        selectedAgent,
+        selectedModel,
+        reviewer,
+        repository,
+      }))
+    )
+    setBulkPopupOpen(true)
+  }
+
+  const updateBulkTicketConfig = (ticketId, field, value) => {
+    setBulkTicketConfigs((prev) =>
+      prev.map((item) => (item.ticketId === ticketId ? { ...item, [field]: value } : item))
+    )
+  }
+
+  const confirmBulkRun = async () => {
+    if (bulkSubmitting) return
+
+    const invalid = bulkTicketConfigs.find((item) => !item.repository?.trim())
+    if (invalid) {
+      setJqlError(`Repository is required for ${invalid.ticketId}`)
+      return
+    }
+
+    setJqlError('')
+    setBulkSubmitting(true)
     setJobStatus('queued')
     try {
-      const jobs = await Promise.all(selectedJiraTickets.map((ticketId) => runTicketWorkflow(ticketId)))
+      const jobs = await Promise.all(
+        bulkTicketConfigs.map((item) =>
+          runTicketWorkflow(item.ticketId, {
+            selectedAgent: item.selectedAgent,
+            selectedModel: item.selectedModel,
+            reviewer: item.reviewer,
+            repository: item.repository,
+          })
+        )
+      )
       setRunningJobs((prev) => {
-        const byId = new Map(prev.map((item) => [item.id, item]))
-        jobs.forEach((item) => byId.set(item.id, item))
+        const byId = new Map(prev.map((entry) => [entry.id, entry]))
+        jobs.forEach((entry) => byId.set(entry.id, entry))
         return Array.from(byId.values())
       })
-      setActiveTab('executing')
-      setJobStatus('idle')
       setSelectedJiraTickets([])
+      setBulkPopupOpen(false)
+      setBulkTicketConfigs([])
+      setJobStatus('idle')
+      setActiveTab('executing')
     } catch (err) {
       setJobStatus('failed')
       setJqlError(err.message)
+    } finally {
+      setBulkSubmitting(false)
     }
   }
 
@@ -567,7 +612,7 @@ export default function App() {
               expandedPanels={expandedPanels}
               togglePanel={togglePanel}
             >
-              <form onSubmit={triggerOrchestration} className="form-grid">
+              <form onSubmit={triggerOrchestration} className="form-grid trigger-form-grid">
                 <label>
                   Jira Ticket ID
                   <input
@@ -945,6 +990,59 @@ export default function App() {
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {selectedArtifact.content || ''}
               </ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bulkPopupOpen && (
+        <div className="artifact-modal-backdrop" onClick={() => setBulkPopupOpen(false)}>
+          <div className="artifact-modal bulk-run-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="artifact-modal-header">
+              <h3>Confirm Bulk Agentic Workflow</h3>
+              <button type="button" onClick={() => setBulkPopupOpen(false)}>Close</button>
+            </div>
+            <div className="bulk-run-body">
+              {bulkTicketConfigs.map((item) => (
+                <div key={item.ticketId} className="bulk-run-card">
+                  <h4>{item.ticketId}</h4>
+                  <div className="form-grid">
+                    <label>
+                      Agent
+                      <select value={item.selectedAgent} onChange={(e) => updateBulkTicketConfig(item.ticketId, 'selectedAgent', e.target.value)}>
+                        {availableAgents.map((agent) => (
+                          <option key={agent} value={agent}>{agent}</option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      Model
+                      <select value={item.selectedModel} onChange={(e) => updateBulkTicketConfig(item.ticketId, 'selectedModel', e.target.value)}>
+                        <option value=''>Auto</option>
+                        {availableModels.map((model) => (
+                          <option key={model.id} value={model.id}>{model.name}</option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      Reviewer (GitHub username)
+                      <input value={item.reviewer || ''} onChange={(e) => updateBulkTicketConfig(item.ticketId, 'reviewer', e.target.value)} placeholder="teammate-name" />
+                    </label>
+
+                    <label>
+                      Repository (owner/repo or URL)
+                      <input value={item.repository || ''} onChange={(e) => updateBulkTicketConfig(item.ticketId, 'repository', e.target.value)} placeholder="owner/repo" />
+                    </label>
+                  </div>
+                </div>
+              ))}
+              <div className="bulk-run-actions">
+                <button type="button" onClick={confirmBulkRun} disabled={bulkSubmitting}>
+                  {bulkSubmitting ? 'Triggering...' : `Confirm and Trigger (${bulkTicketConfigs.length})`}
+                </button>
+              </div>
             </div>
           </div>
         </div>

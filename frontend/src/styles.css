@@ -366,6 +366,10 @@ body {
   align-items: end;
 }
 
+.trigger-form-grid {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
 label {
   display: grid;
   gap: 0.35rem;
@@ -1421,6 +1425,11 @@ button:hover {
   padding: 0;
   font-size: 1.45rem;
   box-shadow: 0 10px 28px #00000070;
+  cursor: grab;
+}
+
+.chat-fab-launcher:active {
+  cursor: grabbing;
 }
 
 .chat-panel {
@@ -1429,10 +1438,14 @@ button:hover {
 }
 
 .chat-panel--floating {
-  width: min(1040px, calc(100vw - 2rem));
-  height: min(82vh, 760px);
+  width: min(860px, calc(100vw - 2rem));
+  height: min(90vh, 860px);
   padding: 0.85rem;
   border-radius: 16px;
+  background:
+    radial-gradient(circle at 10% 5%, #0d2d4e90 0%, transparent 44%),
+    radial-gradient(circle at 90% 100%, #5b2d0e70 0%, transparent 48%),
+    linear-gradient(170deg, #0b1324 0%, #101a34 58%, #0d1528 100%);
 }
 
 .chat-header {
@@ -1575,6 +1588,38 @@ button:hover {
 
 .jira-selection-actions button:hover {
   background: #1b3557;
+}
+
+.bulk-run-modal {
+  width: min(980px, 100%);
+}
+
+.bulk-run-body {
+  padding: 0.85rem 1rem 1rem;
+  display: grid;
+  gap: 0.75rem;
+  max-height: 74vh;
+  overflow-y: auto;
+}
+
+.bulk-run-card {
+  border: 1px solid #304764;
+  border-radius: 12px;
+  padding: 0.7rem;
+  background: #0f1a2d;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.bulk-run-card h4 {
+  margin: 0;
+  color: #fdba74;
+  font-size: 0.9rem;
+}
+
+.bulk-run-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .jira-results-table {
