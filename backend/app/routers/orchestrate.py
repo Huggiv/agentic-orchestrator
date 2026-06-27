@@ -81,6 +81,26 @@ def _workspace_dir_for_job(job_id: str) -> str:
     return str(base_dir / f"agent_flow-agentic-{job_id[:8]}")
 
 
+def _build_result_fallback(result: dict | None) -> dict:
+    if not isinstance(result, dict):
+        return {}
+
+    # Keep critical panels (PR/artifacts/steps/usage) available in history even when
+    # full payload serialization fails.
+    return {
+        "branch_name": result.get("branch_name"),
+        "pull_request_url": result.get("pull_request_url"),
+        "workspace_dir": result.get("workspace_dir"),
+        "steps": result.get("steps") or [],
+        "selected_agent": result.get("selected_agent"),
+        "artifacts": result.get("artifacts") or [],
+        "usage": result.get("usage") or {},
+        "warnings": [
+            "Full orchestration result payload could not be persisted; stored fallback fields.",
+        ],
+    }
+
+
 def _fetch_jira_details(jira_ticket_id: str) -> dict:
     try:
         issue = jira_service.get_issue(jira_ticket_id)
@@ -121,13 +141,6 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             cancellation_token=cancel_token,
             run_id=f"agent_flow-agentic-{job_id[:8]}",
         )
-        history_store.set_job_fields(
-            job_id,
-            status="success",
-            finished_at=_now(),
-            result=result,
-            error=None,
-        )
     except OrchestrationCancelled:
         history_store.set_job_fields(
             job_id,
@@ -144,6 +157,25 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             finished_at=_now(),
             error=f"Unexpected error: {e}",
         )
+    else:
+        try:
+            history_store.set_job_fields(
+                job_id,
+                status="success",
+                finished_at=_now(),
+                result=result,
+                error=None,
+            )
+        except Exception:
+            # Retry with reduced payload so successful runs still surface PR and artifacts.
+            fallback_result = _build_result_fallback(result)
+            history_store.set_job_fields(
+                job_id,
+                status="success",
+                finished_at=_now(),
+                result=fallback_result,
+                error=None,
+            )
     finally:
         with _JOB_CANCEL_LOCK:
             _JOB_CANCEL_TOKENS.pop(job_id, None)

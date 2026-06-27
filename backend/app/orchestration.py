@@ -524,20 +524,24 @@ def _read_shutdown_event(events_file: Path) -> dict | None:
         return None
 
     shutdown_data: dict | None = None
-    with events_file.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if payload.get("type") != "session.shutdown":
-                continue
-            data = payload.get("data")
-            if isinstance(data, dict):
-                shutdown_data = data
+    try:
+        with events_file.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") != "session.shutdown":
+                    continue
+                data = payload.get("data")
+                if isinstance(data, dict):
+                    shutdown_data = data
+    except OSError:
+        # Session-state files can disappear between exists() and open() due to cleanup.
+        return None
 
     return shutdown_data
 
@@ -552,11 +556,17 @@ def _load_shutdown_events(session_ids: list[str]) -> list[dict]:
     if unique_ids:
         candidates = [_COPILOT_SESSION_STATE_DIR / sid / "events.jsonl" for sid in unique_ids]
     else:
-        candidates = sorted(
-            (path / "events.jsonl" for path in _COPILOT_SESSION_STATE_DIR.iterdir() if path.is_dir()),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
+        indexed_candidates: list[tuple[float, Path]] = []
+        for path in _COPILOT_SESSION_STATE_DIR.iterdir():
+            if not path.is_dir():
+                continue
+            events_file = path / "events.jsonl"
+            try:
+                mtime = events_file.stat().st_mtime
+            except OSError:
+                continue
+            indexed_candidates.append((mtime, events_file))
+        candidates = [file for _, file in sorted(indexed_candidates, key=lambda item: item[0], reverse=True)]
         candidates = candidates[:1]
 
     for events_file in candidates:
@@ -568,7 +578,10 @@ def _load_shutdown_events(session_ids: list[str]) -> list[dict]:
 
 
 def _build_usage_from_session_logs(session_ids: list[str], changes_override: dict[str, int] | None = None) -> dict:
-    shutdown_events = _load_shutdown_events(session_ids)
+    try:
+        shutdown_events = _load_shutdown_events(session_ids)
+    except OSError:
+        shutdown_events = []
     session_log_found = bool(shutdown_events)
 
     total_nano_aiu = 0

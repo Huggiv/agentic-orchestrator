@@ -160,6 +160,16 @@ def test_build_usage_from_session_logs_uses_shutdown_event(monkeypatch, tmp_path
     assert usage["changes"] == {"added": 101, "removed": 6}
 
 
+    def test_build_usage_from_session_logs_tolerates_missing_events_file(monkeypatch):
+        monkeypatch.setattr("app.orchestration._load_shutdown_events", lambda session_ids: (_ for _ in ()).throw(FileNotFoundError("missing")))
+
+        usage = _build_usage_from_session_logs(["session-abc"], changes_override={"added": 1, "removed": 0})
+
+        assert usage["session_log_found"] is False
+        assert usage["changes"] == {"added": 1, "removed": 0}
+        assert usage["ai_credits_used"] == 0.0
+
+
 def test_build_usage_from_session_logs_prefers_git_changes_override(monkeypatch, tmp_path):
     session_id = "f1111111-1111-4111-8111-111111111111"
     session_dir = tmp_path / session_id

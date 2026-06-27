@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.history_store import reset_history_store_for_tests
+from app.history_store import get_history_store, reset_history_store_for_tests
 from app.main import app
 from app.orchestration import OrchestrationCancelled
 
@@ -240,6 +240,74 @@ def test_chat_stream_emits_result_and_done_events(monkeypatch):
 
 def test_chat_cancel_job_rejects_non_chat_trigger(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+
+def test_success_status_preserved_when_full_result_persistence_fails_once(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    def fake_run_orchestration(
+        jira_ticket_id,
+        repository,
+        base_branch,
+        reviewer,
+        selected_agent,
+        selected_model,
+        commit_message,
+        change_plan,
+        progress_callback,
+        cancellation_token,
+        run_id,
+    ):
+        progress_callback({"name": "prepare_branch", "status": "success", "details": base_branch, "timestamp": "2026-06-23T00:00:01+00:00"})
+        return {
+            "branch_name": f"feature/{jira_ticket_id.lower()}",
+            "pull_request_url": f"https://github.com/{repository}/pull/42",
+            "workspace_dir": f"/tmp/{run_id}",
+            "steps": [{"name": "prepare_branch", "status": "success"}],
+            "artifacts": [{"path": ".agent_flow_agentic/note.md", "content": "ok"}],
+            "copilot_notes": ["large output"],
+            "usage": {"ai_credits_used": 0.2, "estimated_cost_usd": 0.002},
+        }
+
+    monkeypatch.setattr("app.routers.orchestrate.run_orchestration", fake_run_orchestration)
+
+    history_store = get_history_store()
+    original_set_job_fields = history_store.set_job_fields
+    state = {"raised": False}
+
+    def flaky_set_job_fields(job_id, **fields):
+        if fields.get("status") == "success" and "result" in fields and not state["raised"]:
+            state["raised"] = True
+            raise ValueError("serialization failed")
+        return original_set_job_fields(job_id, **fields)
+
+    monkeypatch.setattr(history_store, "set_job_fields", flaky_set_job_fields)
+
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/api/orchestrate",
+            json={
+                "jira_ticket_id": "AGENT_FLOW-510",
+                "repository": "owner/repo",
+                "base_branch": "development",
+                "reviewer": None,
+                "selected_agent": "SWE",
+                "commit_message": "feat(agent_flow-510): automated implementation",
+                "change_plan": ["Implement", "Test"],
+            },
+        )
+        create_response.raise_for_status()
+        job_id = create_response.json()["job_id"]
+
+        payload = _wait_for_status(client, job_id=job_id, expected="success", timeout_seconds=3.0)
+
+    assert payload["status"] == "success"
+    assert payload["result"]["pull_request_url"] == "https://github.com/owner/repo/pull/42"
+    assert payload["result"]["artifacts"][0]["path"] == ".agent_flow_agentic/note.md"
+    assert payload["result"]["warnings"]
+
     reset_history_store_for_tests()
 
     def fake_run_orchestration(

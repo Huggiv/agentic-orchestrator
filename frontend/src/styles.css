@@ -389,6 +389,25 @@ body {
   background: #1a4068;
 }
 
+.icon-refresh-button {
+  min-width: 2.25rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-refresh-glyph {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.icon-refresh-glyph.is-spinning {
+  animation: spinRefresh 0.9s linear infinite;
+}
+
 label {
   display: grid;
   gap: 0.35rem;
@@ -1796,6 +1815,15 @@ button:hover {
 
 .chat-model-refresh:hover {
   background: #1d446b;
+}
+
+@keyframes spinRefresh {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .chat-inline-confirm {

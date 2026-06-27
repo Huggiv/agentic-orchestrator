@@ -674,11 +674,13 @@ export default function App() {
                     </select>
                     <button
                       type="button"
-                      className="secondary-button"
+                      className="secondary-button icon-refresh-button"
                       onClick={() => loadModels({ force: true })}
                       disabled={modelsLoading}
+                      title="Refresh available models from backend"
+                      aria-label="Refresh available models"
                     >
-                      {modelsLoading ? 'Refreshing...' : 'Refresh'}
+                      <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
                     </button>
                   </div>
                 </label>
@@ -1043,11 +1045,13 @@ export default function App() {
               <div className="bulk-model-refresh-row">
                 <button
                   type="button"
-                  className="secondary-button"
+                  className="secondary-button icon-refresh-button"
                   onClick={() => loadModels({ force: true })}
                   disabled={modelsLoading}
+                  title="Refresh available models for all selected tickets"
+                  aria-label="Refresh models for bulk trigger"
                 >
-                  {modelsLoading ? 'Refreshing models...' : 'Refresh Models'}
+                  <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
                 </button>
               </div>
               {bulkTicketConfigs.map((item) => (

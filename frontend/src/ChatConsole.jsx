@@ -712,11 +712,13 @@ export default function ChatConsole({
                 </select>
                 <button
                   type="button"
-                  className="chat-model-refresh"
+                  className="chat-model-refresh icon-refresh-button"
                   onClick={onRefreshModels}
                   disabled={modelsLoading}
+                  title="Refresh model list used by chat composer"
+                  aria-label="Refresh chat model list"
                 >
-                  {modelsLoading ? 'Refreshing...' : 'Refresh'}
+                  <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
                 </button>
                 <button type="submit" disabled={!canSend}>
                   {isSending ? 'Sending...' : 'Send'}
