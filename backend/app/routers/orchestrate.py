@@ -10,11 +10,12 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.history_store import get_history_store
 from app.orchestration import CancellationToken, OrchestrationCancelled, OrchestrationError, run_orchestration
 from app.jira import service as jira_service
+from app.routers.auth import require_admin, require_run_permission
 
 router = APIRouter(prefix="/api", tags=["orchestrate"])
 _JOB_CANCEL_TOKENS: dict[str, CancellationToken] = {}
@@ -216,7 +217,7 @@ def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional
 
 
 @router.post("/orchestrate")
-def orchestrate(payload: OrchestrateRequest):
+def orchestrate(payload: OrchestrateRequest, _user: dict = Depends(require_run_permission)):
     return enqueue_orchestration(payload)
 
 
@@ -230,7 +231,10 @@ def orchestrate_history(
 
 
 @router.post("/orchestrate/history/purge")
-def purge_orchestrate_history(days: int = Query(default=30, ge=1, le=3650)):
+def purge_orchestrate_history(
+    days: int = Query(default=30, ge=1, le=3650),
+    _admin: dict = Depends(require_admin),
+):
     deleted = get_history_store().purge_old_jobs(days=days)
     return {"deleted": deleted, "days": days}
 
@@ -249,7 +253,7 @@ def orchestrate_status(job_id: str):
 
 
 @router.post("/orchestrate/{job_id}/cancel")
-def cancel_orchestration(job_id: str):
+def cancel_orchestration(job_id: str, _user: dict = Depends(require_run_permission)):
     history_store = get_history_store()
     job = history_store.get_job(job_id)
     if not job:
@@ -285,7 +289,7 @@ def cancel_orchestration(job_id: str):
 
 
 @router.delete("/orchestrate/{job_id}")
-def delete_orchestration(job_id: str):
+def delete_orchestration(job_id: str, _admin: dict = Depends(require_admin)):
     history_store = get_history_store()
     job = history_store.get_job(job_id)
     if not job:

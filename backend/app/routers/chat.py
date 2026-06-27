@@ -7,6 +7,7 @@ from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter
+from fastapi import Depends
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.orchestration import OrchestrationError, _prepare_env, _run_copilot_prompt
 from app.jira import service as jira_service
 from app.history_store import get_history_store
+from app.routers.auth import require_run_permission
 from app.routers.orchestrate import OrchestrateRequest, cancel_orchestration, enqueue_orchestration
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -425,7 +427,7 @@ def chat_message_stream(payload: ChatMessageRequest):
 
 
 @router.post("/chat/cancel/{job_id}")
-def chat_cancel_job(job_id: str):
+def chat_cancel_job(job_id: str, _user: dict = Depends(require_run_permission)):
     job = get_history_store().get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Orchestration job not found")
@@ -438,7 +440,7 @@ def chat_cancel_job(job_id: str):
 
 
 @router.post("/chat/confirm")
-def chat_confirm(payload: ChatConfirmRequest):
+def chat_confirm(payload: ChatConfirmRequest, _user: dict = Depends(require_run_permission)):
     _purge_expired_plans()
     plan = _PENDING_CHAT_PLANS.get(payload.plan_id)
     if not plan:

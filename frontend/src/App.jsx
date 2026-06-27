@@ -5,6 +5,8 @@ import ExecutingJobs from './ExecutingJobs'
 import ChatConsole from './ChatConsole'
 import JobFlowSteps, { computeFlowProgress, buildLogRows, RawLogsTable } from './JobFlowSteps'
 import { getModels, refreshModels } from './services/models'
+import { getSession, logout, canRunWorkflows, canManageHistory, ROLE_LABELS } from './services/auth'
+import LoginPage from './LoginPage'
 
 const defaultPlan = [
   'Analyze impacted files',
@@ -119,6 +121,9 @@ const CollapsiblePanel = ({
 }
 
 export default function App() {
+  const [authLoading, setAuthLoading] = useState(true)
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [currentUser, setCurrentUser] = useState(null)
   const [ticket, setTicket] = useState('')
   const [availableAgents, setAvailableAgents] = useState(['SWE'])
   const [selectedAgent, setSelectedAgent] = useState('SWE')
@@ -215,6 +220,27 @@ export default function App() {
   }
 
   useEffect(() => {
+    getSession()
+      .then((session) => {
+        if (session.authenticated) {
+          setIsAuthenticated(true)
+          setCurrentUser(session.user || null)
+        } else {
+          setIsAuthenticated(false)
+          setCurrentUser(null)
+        }
+      })
+      .catch(() => {
+        setIsAuthenticated(false)
+        setCurrentUser(null)
+      })
+      .finally(() => {
+        setAuthLoading(false)
+      })
+  }, [])
+
+  useEffect(() => {
+    if (!isAuthenticated) return
     loadHistory().catch((err) => setError(err.message))
     loadAgents().catch(() => {
       setAvailableAgents(['SWE'])
@@ -222,7 +248,7 @@ export default function App() {
     })
 
     loadModels().catch(() => undefined)
-  }, [])
+  }, [isAuthenticated])
 
   useEffect(() => {
     const hasRunningJobs = history.some((entry) => entry.status === 'queued' || entry.status === 'running')
@@ -245,6 +271,26 @@ export default function App() {
   const handleJobComplete = (jobId) => {
     setRunningJobs((prev) => prev.filter((job) => job.id !== jobId))
     loadHistory().catch(() => undefined)
+  }
+
+  const handleAuthenticated = (user) => {
+    setIsAuthenticated(true)
+    setCurrentUser(user || null)
+    setAuthLoading(false)
+  }
+
+  const handleLogout = async () => {
+    try {
+      await logout()
+    } finally {
+      setIsAuthenticated(false)
+      setCurrentUser(null)
+      setHistory([])
+      setRunningJobs([])
+      setResult(null)
+      setError('')
+      setActiveTab('run')
+    }
   }
 
   const handleDeleteHistoryEntry = async (entryId) => {
@@ -587,6 +633,22 @@ export default function App() {
     )
   }
 
+  if (authLoading) {
+    return (
+      <div className="auth-loading-shell">
+        <div className="auth-loading-card">Checking session...</div>
+      </div>
+    )
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage onAuthenticated={handleAuthenticated} />
+  }
+
+  const canRun = canRunWorkflows(currentUser)
+  const canManage = canManageHistory(currentUser)
+  const roleLabel = ROLE_LABELS[currentUser?.role] || 'User'
+
   return (
     <div className="page">
       {/* RevGenAI-style fixed topnav */}
@@ -620,9 +682,12 @@ export default function App() {
         </nav>
 
         <div className="topnav-right">
+          <span className="topnav-user-pill">{currentUser?.name || currentUser?.email || 'User'}</span>
+          <span className={`topnav-role-badge topnav-role-badge--${currentUser?.role || 'user'}`}>{roleLabel}</span>
           <span className={`topnav-status topnav-status--${jobStatus}`}>
             {JOB_STATUS_LABELS[jobStatus] || jobStatus}
           </span>
+          <button type="button" className="topnav-logout" onClick={handleLogout}>Logout</button>
         </div>
       </header>
 
@@ -695,9 +760,12 @@ export default function App() {
                   <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
                 </label>
 
-                <button type="submit" disabled={isRunning}>
+                <button type="submit" disabled={isRunning || !canRun}>
                   {isRunning ? 'Running…' : 'Run Agentic Flow'}
                 </button>
+                {!canRun && (
+                  <p className="readonly-note">Your role has read-only access. Running agentic workflows is restricted to Admin and Developer roles.</p>
+                )}
               </form>
             </CollapsiblePanel>
 
@@ -720,9 +788,11 @@ export default function App() {
                 <button type="submit" disabled={jqlLoading}>
                   {jqlLoading ? 'Searching...' : 'Search Jira'}
                 </button>
-                <button type="button" onClick={runSelectedJiraWorkflows} disabled={selectedJiraTickets.length === 0}>
-                  Run Selected ({selectedJiraTickets.length})
-                </button>
+                {canRun && (
+                  <button type="button" onClick={runSelectedJiraWorkflows} disabled={selectedJiraTickets.length === 0}>
+                    Run Selected ({selectedJiraTickets.length})
+                  </button>
+                )}
               </form>
 
               {jqlIssues.length > 0 && (
@@ -833,13 +903,15 @@ export default function App() {
         <section className="panel">
           <div className="panel-title-row">
             <h2>Orchestration History</h2>
-            <button
-              type="button"
-              className="history-purge-btn"
-              onClick={handlePurgeHistoryOlderThan30Days}
-            >
-              Purge Older Than 30 Days
-            </button>
+            {canManage && (
+              <button
+                type="button"
+                className="history-purge-btn"
+                onClick={handlePurgeHistoryOlderThan30Days}
+              >
+                Purge Older Than 30 Days
+              </button>
+            )}
           </div>
 
           <div className="history-filters">
@@ -902,15 +974,17 @@ export default function App() {
                         Duration: {formatDurationCompact(entry.result?.usage?.ai?.duration_seconds)}
                       </span>
                       <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
-                      <button
-                        type="button"
-                        className="history-delete-btn"
-                        onClick={() => handleDeleteHistoryEntry(entry.id)}
-                        title="Delete record"
-                        aria-label="Delete orchestration record"
-                      >
-                        x
-                      </button>
+                      {canManage && (
+                        <button
+                          type="button"
+                          className="history-delete-btn"
+                          onClick={() => handleDeleteHistoryEntry(entry.id)}
+                          title="Delete record"
+                          aria-label="Delete orchestration record"
+                        >
+                          x
+                        </button>
+                      )}
                     </div>
                   </div>
                   {entry.status === 'failed' && entry.error && (
@@ -1099,21 +1173,23 @@ export default function App() {
         </div>
       )}
 
-      <ChatConsole
-        repository={repository}
-        setRepository={setRepository}
-        reviewer={reviewer}
-        setReviewer={setReviewer}
-        selectedAgent={selectedAgent}
-        setSelectedAgent={setSelectedAgent}
-        selectedModel={selectedModel}
-        setSelectedModel={setSelectedModel}
-        availableAgents={availableAgents}
-        availableModels={availableModels}
-        modelsLoading={modelsLoading}
-        onRefreshModels={() => loadModels({ force: true })}
-        onJobsQueued={handleChatQueuedJobs}
-      />
+      {canRun && (
+        <ChatConsole
+          repository={repository}
+          setRepository={setRepository}
+          reviewer={reviewer}
+          setReviewer={setReviewer}
+          selectedAgent={selectedAgent}
+          setSelectedAgent={setSelectedAgent}
+          selectedModel={selectedModel}
+          setSelectedModel={setSelectedModel}
+          availableAgents={availableAgents}
+          availableModels={availableModels}
+          modelsLoading={modelsLoading}
+          onRefreshModels={() => loadModels({ force: true })}
+          onJobsQueued={handleChatQueuedJobs}
+        />
+      )}
 
       {/* Footer */}
       <footer className="app-footer">
