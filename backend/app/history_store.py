@@ -134,6 +134,34 @@ class HistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_progress_job_id
                 ON orchestration_progress(job_id, id);
+
+                CREATE TABLE IF NOT EXISTS chat_sessions (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    selected_model TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT,
+                    FOREIGN KEY(session_id) REFERENCES chat_sessions(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated_at
+                ON chat_sessions(updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+                ON chat_messages(session_id, created_at ASC);
                 """
             )
             self._purge_old_jobs_locked(days=30)
@@ -306,6 +334,177 @@ class HistoryStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def create_chat_session(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        mode: str,
+        selected_model: str | None,
+        created_at: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        metadata_json = self._to_json(metadata)
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO chat_sessions (
+                    id, title, status, mode, selected_model, created_at, updated_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    title,
+                    "open",
+                    mode,
+                    selected_model,
+                    created_at,
+                    created_at,
+                    metadata_json,
+                ),
+            )
+            self._conn.commit()
+
+    def list_chat_sessions(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, title, status, mode, selected_model, created_at, updated_at, metadata_json
+                FROM chat_sessions
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        sessions: list[dict[str, Any]] = []
+        for row in rows:
+            sessions.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "status": row["status"],
+                    "mode": row["mode"],
+                    "selected_model": row["selected_model"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "metadata": self._from_json(row["metadata_json"]) or {},
+                }
+            )
+        return sessions
+
+    def get_chat_session(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, title, status, mode, selected_model, created_at, updated_at, metadata_json
+                FROM chat_sessions
+                WHERE id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "mode": row["mode"],
+            "selected_model": row["selected_model"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "metadata": self._from_json(row["metadata_json"]) or {},
+        }
+
+    def update_chat_session(self, session_id: str, **fields: Any) -> bool:
+        if not fields:
+            return False
+
+        db_fields = dict(fields)
+        if "metadata" in db_fields:
+            db_fields["metadata_json"] = self._to_json(db_fields.pop("metadata"))
+
+        valid_columns = {
+            "title",
+            "status",
+            "mode",
+            "selected_model",
+            "updated_at",
+            "metadata_json",
+        }
+        unknown = set(db_fields) - valid_columns
+        if unknown:
+            raise ValueError(f"Unsupported chat session fields: {sorted(unknown)}")
+
+        assignments = ", ".join(f"{column} = ?" for column in db_fields)
+        values = [db_fields[column] for column in db_fields]
+        values.append(session_id)
+
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE chat_sessions SET {assignments} WHERE id = ?",
+                values,
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def append_chat_message(
+        self,
+        *,
+        message_id: str,
+        session_id: str,
+        role: str,
+        kind: str,
+        content: str,
+        created_at: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        payload_json = self._to_json(payload) if payload is not None else None
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO chat_messages (
+                    id, session_id, role, kind, content, created_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, session_id, role, kind, content, created_at, payload_json),
+            )
+            self._conn.execute(
+                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
+                (created_at, session_id),
+            )
+            self._conn.commit()
+
+    def list_chat_messages(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, session_id, role, kind, content, created_at, payload_json
+                FROM chat_messages
+                WHERE session_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            messages.append(
+                {
+                    "id": row["id"],
+                    "session_id": row["session_id"],
+                    "role": row["role"],
+                    "kind": row["kind"],
+                    "content": row["content"],
+                    "created_at": row["created_at"],
+                    "payload": self._from_json(row["payload_json"]) if row["payload_json"] else None,
+                }
+            )
+        return messages
+
+    def archive_chat_session(self, session_id: str, archived_at: str) -> bool:
+        return self.update_chat_session(session_id, status="closed", updated_at=archived_at)
 
 
 _history_store: HistoryStore | None = None

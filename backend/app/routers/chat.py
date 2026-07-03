@@ -1,26 +1,23 @@
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import Query
 from pydantic import BaseModel, Field
 
 from app.orchestration import OrchestrationError, _prepare_env, _run_copilot_prompt
 from app.jira import service as jira_service
 from app.history_store import get_history_store
 from app.routers.auth import require_run_permission
-from app.routers.orchestrate import OrchestrateRequest, cancel_orchestration, enqueue_orchestration
+from app.routers.orchestrate import OrchestrateRequest, enqueue_orchestration
 
 router = APIRouter(prefix="/api", tags=["chat"])
-_CHAT_PLAN_TTL = timedelta(minutes=20)
-_PENDING_CHAT_PLANS: dict[str, dict] = {}
 
 _GROOMING_REQUIRED_FIELDS = [
     "problem",
@@ -63,141 +60,6 @@ def _first_sentence(text: str, max_len: int = 72) -> str:
     return sentence[: max_len - 3].rstrip() + "..."
 
 
-def _build_change_plan(prompt: str, issue: dict) -> list[str]:
-    summary = str(issue.get("summary") or "").strip()
-    issue_type = str(issue.get("type") or "").strip()
-    plan = [
-        "Analyze impacted files and dependencies",
-        "Implement requested behavior with small safe changes",
-        "Run tests and lint checks before finalizing",
-    ]
-    if summary:
-        plan.append(f"Primary Jira objective: {summary}")
-    if issue_type:
-        plan.append(f"Issue type: {issue_type}")
-
-    guidance = " ".join(prompt.split())
-    if guidance:
-        plan.append(f"Prompt grooming guidance: {guidance}")
-    return plan
-
-
-def _build_assistant_response(
-    prompt: str,
-    ticket_ids: list[str],
-    queued_jobs: list[dict],
-    failed_tickets: list[dict],
-) -> str:
-    if not ticket_ids:
-        return (
-            "I can run agentic workflows from chat, including multiple tickets in one message. "
-            "Please include at least one Jira ticket key such as AGENT_FLOW-101, plus any grooming instructions."
-        )
-
-    ticket_csv = ", ".join(ticket_ids)
-    if not queued_jobs:
-        return (
-            f"I found tickets in your prompt ({ticket_csv}), but none could be queued. "
-            "Please verify Jira access and ticket validity, then retry."
-        )
-
-    job_summaries = ", ".join(f"{item['jira_ticket_id']} ({item['job_id']})" for item in queued_jobs)
-    message = (
-        f"Queued {len(queued_jobs)} workflow run(s) from your prompt for: {ticket_csv}. "
-        f"Each run is groomed with your prompt instructions and tracked independently in history/executing views. "
-        f"Queued jobs: {job_summaries}."
-    )
-    if failed_tickets:
-        failed_csv = ", ".join(item["jira_ticket_id"] for item in failed_tickets)
-        message += f" Skipped ticket(s): {failed_csv}."
-    return message
-
-
-def _sse_event(event: str, payload: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
-
-
-def _chunk_text(text: str, chunk_size: int = 22) -> list[str]:
-    words = text.split()
-    if not words:
-        return []
-    chunks: list[str] = []
-    for idx in range(0, len(words), chunk_size):
-        piece = " ".join(words[idx : idx + chunk_size])
-        if idx + chunk_size < len(words):
-            piece = f"{piece} "
-        chunks.append(piece)
-    return chunks
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _purge_expired_plans() -> None:
-    now = _now()
-    expired = [plan_id for plan_id, item in _PENDING_CHAT_PLANS.items() if item["expires_at"] <= now]
-    for plan_id in expired:
-        _PENDING_CHAT_PLANS.pop(plan_id, None)
-
-
-def _build_grooming_prompt(prompt: str, ticket_ids: list[str], issues: list[dict]) -> str:
-    issue_blocks = []
-    for issue in issues:
-        issue_blocks.append(
-            "\n".join(
-                [
-                    f"Ticket: {issue.get('key', '')}",
-                    f"Summary: {issue.get('summary', '')}",
-                    f"Type: {issue.get('type', '')}",
-                    f"Description: {issue.get('description', '')}",
-                ]
-            )
-        )
-    issue_text = "\n\n".join(issue_blocks)
-    ticket_csv = ", ".join(ticket_ids)
-    return (
-        "You are a Jira grooming assistant.\n"
-        f"User prompt: {prompt}\n"
-        f"Tickets: {ticket_csv}\n\n"
-        f"Issue details:\n{issue_text}\n\n"
-        "Return a concise markdown response with sections:\n"
-        "1) Groomed Scope\n"
-        "2) Acceptance Criteria\n"
-        "3) Risks\n"
-        "4) Suggested Implementation Plan (short bullets)\n"
-        "Keep it actionable and implementation-ready."
-    )
-
-
-def _groom_with_llm(prompt: str, ticket_ids: list[str], issues: list[dict], selected_model: str | None) -> str:
-    env = _prepare_env()
-    grooming_prompt = _build_grooming_prompt(prompt, ticket_ids, issues)
-    agent_name = "SWE"
-    try:
-        output = _run_copilot_prompt(
-            grooming_prompt,
-            cwd="/tmp",
-            env=env,
-            agent_name=agent_name,
-            model=selected_model,
-        )
-        return (output or "").strip()
-    except OrchestrationError:
-        return (
-            "## Groomed Scope\n"
-            f"- Tickets: {', '.join(ticket_ids)}\n"
-            "- Prepared from Jira details and prompt context.\n\n"
-            "## Acceptance Criteria\n"
-            "- Behavior matches Jira intent\n"
-            "- Tests updated\n\n"
-            "## Risks\n"
-            "- Environment/auth may affect automation quality\n\n"
-            "## Suggested Implementation Plan\n"
-            "- Analyze impacted files\n"
-            "- Apply focused changes\n"
-            "- Validate with tests"
-        )
 
 
 def _respond_with_llm(prompt: str, selected_model: str | None) -> str:
@@ -219,26 +81,6 @@ def _respond_with_llm(prompt: str, selected_model: str | None) -> str:
         return text or "I can help with that. Share more context and I will provide a concise plan."
     except OrchestrationError:
         return "I can help with that. Share Jira tickets to run workflows, or provide more context for a concise solution."
-
-
-def _build_plan_change_plan(prompt: str, issue: dict, groomed_plan: str) -> list[str]:
-    summary = str(issue.get("summary") or "").strip()
-    issue_type = str(issue.get("type") or "").strip()
-    plan = [
-        "Analyze impacted files and dependencies",
-        "Implement requested behavior with small safe changes",
-        "Run tests and lint checks before finalizing",
-    ]
-    if summary:
-        plan.append(f"Primary Jira objective: {summary}")
-    if issue_type:
-        plan.append(f"Issue type: {issue_type}")
-    guidance = " ".join(prompt.split())
-    if guidance:
-        plan.append(f"Prompt grooming guidance: {guidance}")
-    if groomed_plan:
-        plan.append(f"Groomed plan summary: {' '.join(groomed_plan.split())[:400]}")
-    return plan
 
 
 def _normalize_text_list(value: Any) -> list[str]:
@@ -556,367 +398,407 @@ class GroomingContext(BaseModel):
     pending_field: str | None = None
 
 
-class GroomingAssignRequest(BaseModel):
-    grooming: GroomingContext
-    repository: str = Field(min_length=3, description="GitHub repo as owner/repo or clone URL")
-    base_branch: str = Field(default="development", min_length=1)
-    reviewer: Optional[str] = None
-    selected_agent: Optional[str] = None
-    selected_model: Optional[str] = None
-    jira_ticket_id: Optional[str] = None
+class ChatSessionCreateRequest(BaseModel):
+    title: str | None = None
+    mode: Literal["interactive", "support", "grooming"] = "interactive"
+    model: str | None = None
+    client_context: dict[str, Any] = Field(default_factory=dict)
 
 
-class ChatMessageRequest(BaseModel):
-    message: str = Field(min_length=1, description="Natural language chat input")
-    repository: str = Field(min_length=3, description="GitHub repo as owner/repo or clone URL")
-    base_branch: str = Field(default="development", min_length=1)
-    mode: Literal["support", "grooming"] = "support"
-    reviewer: Optional[str] = None
-    selected_agent: Optional[str] = None
-    selected_model: Optional[str] = None
-    grooming_context: GroomingContext | None = None
+class ChatSessionMessageRequest(BaseModel):
+    message: str = Field(min_length=1)
+    model: str | None = None
+    mode: Literal["interactive", "support", "grooming"] = "interactive"
+    client_context: dict[str, Any] = Field(default_factory=dict)
 
 
-class ChatConfirmRequest(BaseModel):
-    plan_id: str = Field(min_length=8)
-    confirm: bool = Field(default=False)
+class ChatPrepareTriggerRequest(BaseModel):
+    selected_agent: str | None = None
+    repository: str | None = None
+    base_branch: str | None = None
+    reviewer: str | None = None
+    selected_model: str | None = None
 
 
-@router.post("/chat/message")
-def chat_message(payload: ChatMessageRequest):
-    _purge_expired_plans()
+class ChatConfirmTriggerRequest(BaseModel):
+    confirm: bool = True
+    idempotency_key: str | None = None
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _trim_title(title: str | None, fallback: str) -> str:
+    value = str(title or "").strip()
+    if not value:
+        value = fallback
+    return value[:80]
+
+
+def _chat_session_or_404(session_id: str) -> dict[str, Any]:
+    session = get_history_store().get_chat_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": "Chat session not found"})
+    return session
+
+
+def _ensure_open_session(session: dict[str, Any]) -> None:
+    if str(session.get("status") or "") != "open":
+        raise HTTPException(status_code=409, detail={"code": "SESSION_CLOSED", "message": "Chat session is closed"})
+
+
+def _session_metadata(session: dict[str, Any]) -> dict[str, Any]:
+    meta = session.get("metadata")
+    if isinstance(meta, dict):
+        return dict(meta)
+    return {}
+
+
+def _effective_mode(session_mode: str, request_mode: str) -> str:
+    candidate = request_mode if request_mode != "interactive" else session_mode
+    if candidate not in {"support", "grooming"}:
+        return "support"
+    return candidate
+
+
+def _append_chat_message(
+    *,
+    session_id: str,
+    role: str,
+    kind: str,
+    content: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = _utc_iso_now()
+    message_id = f"msg-{uuid4().hex}"
+    get_history_store().append_chat_message(
+        message_id=message_id,
+        session_id=session_id,
+        role=role,
+        kind=kind,
+        content=content,
+        created_at=created_at,
+        payload=payload,
+    )
+    return {
+        "id": message_id,
+        "session_id": session_id,
+        "role": role,
+        "kind": kind,
+        "content": content,
+        "created_at": created_at,
+        "payload": payload,
+    }
+
+
+def _derive_jira_seed_state(prompt: str, issues: list[dict], existing_state: dict[str, Any]) -> dict[str, Any]:
+    seeded = _normalize_grooming_state(existing_state)
+    if not seeded.get("problem"):
+        seeded["problem"] = str((issues[0].get("summary") if issues else "") or prompt).strip()
+    if not seeded.get("user_impact"):
+        seeded["user_impact"] = "Impact inferred from Jira context; refine with user-facing impact details."
+    if not seeded.get("goals"):
+        seeded["goals"] = [
+            f"Address Jira scope for {str(issue.get('key') or '').upper()}" for issue in issues if issue.get("key")
+        ]
+    return seeded
+
+
+@router.post("/chat/sessions")
+def create_chat_session(payload: ChatSessionCreateRequest, _user: dict = Depends(require_run_permission)):
+    now = _utc_iso_now()
+    session_id = f"chat-{uuid4().hex}"
+    mode = "support" if payload.mode == "interactive" else payload.mode
+    metadata = {
+        "client_context": payload.client_context,
+        "grooming_state": _normalize_grooming_state({}),
+        "trigger_state": "draft",
+        "prepared_payload": None,
+        "queued_job": None,
+        "last_ticket_ids": [],
+        "model": payload.model,
+    }
+    title = _trim_title(payload.title, "New Chat")
+    get_history_store().create_chat_session(
+        session_id=session_id,
+        title=title,
+        mode=mode,
+        selected_model=payload.model,
+        created_at=now,
+        metadata=metadata,
+    )
+    return {
+        "session_id": session_id,
+        "title": title,
+        "status": "open",
+        "mode": mode,
+        "selected_model": payload.model,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+@router.get("/chat/sessions")
+def list_chat_sessions(limit: int = Query(default=30, ge=1, le=100), _user: dict = Depends(require_run_permission)):
+    sessions = get_history_store().list_chat_sessions(limit=limit)
+    return {"sessions": sessions}
+
+
+@router.get("/chat/sessions/{session_id}")
+def get_chat_session(session_id: str, _user: dict = Depends(require_run_permission)):
+    session = _chat_session_or_404(session_id)
+    messages = get_history_store().list_chat_messages(session_id)
+    return {
+        "session": session,
+        "message_count": len(messages),
+        "last_message": messages[-1] if messages else None,
+    }
+
+
+@router.get("/chat/sessions/{session_id}/messages")
+def get_chat_session_messages(session_id: str, _user: dict = Depends(require_run_permission)):
+    _chat_session_or_404(session_id)
+    messages = get_history_store().list_chat_messages(session_id)
+    return {"session_id": session_id, "messages": messages}
+
+
+@router.post("/chat/sessions/{session_id}/messages")
+def send_chat_session_message(
+    session_id: str,
+    payload: ChatSessionMessageRequest,
+    _user: dict = Depends(require_run_permission),
+):
+    session = _chat_session_or_404(session_id)
+    _ensure_open_session(session)
+    metadata = _session_metadata(session)
+
     prompt = payload.message.strip()
-    if payload.mode == "grooming":
-        prior_state = _normalize_grooming_state(payload.grooming_context.model_dump() if payload.grooming_context else {})
+    user_message = _append_chat_message(
+        session_id=session_id,
+        role="user",
+        kind="text",
+        content=prompt,
+        payload={"mode": payload.mode, "client_context": payload.client_context},
+    )
+
+    session_mode = _effective_mode(str(session.get("mode") or "support"), payload.mode)
+    selected_model = payload.model or metadata.get("model") or session.get("selected_model")
+
+    if session_mode == "grooming":
+        prior_state = _normalize_grooming_state(metadata.get("grooming_state") or {})
         result = _build_grooming_response(prompt, prior_state)
+        grooming_payload = result.get("grooming") or {}
+        schema = grooming_payload.get("schema") or {}
+        state = _normalize_grooming_state({**schema, "pending_field": grooming_payload.get("pending_field")})
+        metadata["grooming_state"] = state
+        metadata["trigger_state"] = "ready_to_trigger" if grooming_payload.get("is_complete") else "grooming"
+        metadata["model"] = selected_model
+        metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}
+
+        get_history_store().update_chat_session(
+            session_id,
+            mode="grooming",
+            selected_model=selected_model,
+            updated_at=_utc_iso_now(),
+            metadata=metadata,
+        )
+
+        assistant_message = _append_chat_message(
+            session_id=session_id,
+            role="assistant",
+            kind="text",
+            content=str(result.get("assistant_message") or ""),
+            payload={
+                "grooming": grooming_payload,
+                "trigger_state": metadata["trigger_state"],
+                "jira_enrichment": {"ticket_ids": [], "fetched": False, "missing": []},
+            },
+        )
         return {
-            "assistant_message": result["assistant_message"],
-            "tickets": [],
-            "queued_jobs": [],
-            "failed_tickets": [],
-            "requires_confirmation": False,
-            "plan_id": None,
-            "groomed_issue": result["groomed_issue"],
-            "mode": "grooming",
-            "grooming": result["grooming"],
+            "session_id": session_id,
+            "assistant_message": assistant_message,
+            "jira_enrichment": {"ticket_ids": [], "fetched": False, "missing": []},
+            "grooming": grooming_payload.get("schema") or {},
+            "trigger_state": {
+                "status": metadata["trigger_state"],
+                "recommendation": "ready" if grooming_payload.get("is_complete") else "needs_input",
+            },
+            "user_message": user_message,
         }
 
     ticket_ids = _extract_ticket_ids(prompt)
     if not ticket_ids:
-        llm_reply = _respond_with_llm(prompt, payload.selected_model)
+        assistant_text = _respond_with_llm(prompt, selected_model)
+        metadata["trigger_state"] = "draft"
+        metadata["model"] = selected_model
+        metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}
+        get_history_store().update_chat_session(
+            session_id,
+            mode="support",
+            selected_model=selected_model,
+            updated_at=_utc_iso_now(),
+            metadata=metadata,
+        )
+
+        assistant_message = _append_chat_message(
+            session_id=session_id,
+            role="assistant",
+            kind="text",
+            content=assistant_text,
+            payload={
+                "jira_enrichment": {"ticket_ids": [], "fetched": False, "missing": []},
+                "trigger_state": metadata["trigger_state"],
+            },
+        )
         return {
-            "assistant_message": llm_reply,
-            "tickets": [],
-            "queued_jobs": [],
-            "failed_tickets": [],
-            "requires_confirmation": False,
-            "plan_id": None,
-            "groomed_issue": None,
-            "mode": "support",
-            "grooming": None,
+            "session_id": session_id,
+            "assistant_message": assistant_message,
+            "jira_enrichment": {"ticket_ids": [], "fetched": False, "missing": []},
+            "grooming": metadata.get("grooming_state") or {},
+            "trigger_state": {"status": metadata["trigger_state"], "recommendation": "collect_requirements"},
+            "user_message": user_message,
         }
 
-    failed_tickets: list[dict] = []
     issues: list[dict] = []
+    missing: list[str] = []
     for ticket_id in ticket_ids:
         try:
             issues.append(jira_service.get_issue(ticket_id))
-        except Exception as exc:  # noqa: BLE001
-            failed_tickets.append({"jira_ticket_id": ticket_id, "error": str(exc)})
+        except Exception:  # noqa: BLE001
+            missing.append(ticket_id)
+
+    if not issues:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "JIRA_ENRICHMENT_FAILED",
+                "message": "No Jira tickets could be enriched from this prompt",
+                "details": {"ticket_ids": ticket_ids},
+            },
+        )
+
+    seed_state = _derive_jira_seed_state(prompt, issues, metadata.get("grooming_state") or {})
+    grooming_result = _build_grooming_response(prompt, seed_state)
+    grooming_payload = grooming_result.get("grooming") or {}
+    schema = grooming_payload.get("schema") or {}
+    state = _normalize_grooming_state({**schema, "pending_field": grooming_payload.get("pending_field")})
 
     valid_ticket_ids = [str(issue.get("key") or "").upper() for issue in issues if issue.get("key")]
-    if not valid_ticket_ids:
-        return {
-            "assistant_message": "Unable to load any referenced Jira tickets. Please verify ticket IDs and Jira connectivity.",
-            "tickets": ticket_ids,
-            "queued_jobs": [],
-            "failed_tickets": failed_tickets,
-            "requires_confirmation": False,
-            "plan_id": None,
-            "groomed_issue": None,
-            "mode": "support",
-            "grooming": None,
-        }
+    metadata["grooming_state"] = state
+    metadata["trigger_state"] = "ready_to_trigger" if grooming_payload.get("is_complete") else "grooming"
+    metadata["last_ticket_ids"] = valid_ticket_ids
+    metadata["model"] = selected_model
+    metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}
 
-    groomed_issue = _groom_with_llm(prompt, valid_ticket_ids, issues, payload.selected_model)
-    plan_id = f"plan-{uuid4().hex}"
-    _PENDING_CHAT_PLANS[plan_id] = {
-        "created_at": _now(),
-        "expires_at": _now() + _CHAT_PLAN_TTL,
-        "prompt": prompt,
-        "repository": payload.repository,
-        "base_branch": payload.base_branch,
-        "reviewer": payload.reviewer,
-        "selected_agent": payload.selected_agent,
-        "selected_model": payload.selected_model,
-        "ticket_ids": valid_ticket_ids,
-        "issues": issues,
-        "groomed_issue": groomed_issue,
-    }
-
-    failed_csv = ", ".join(item["jira_ticket_id"] for item in failed_tickets) if failed_tickets else None
-    assistant_message = (
-        f"I groomed {len(valid_ticket_ids)} ticket(s): {', '.join(valid_ticket_ids)}. "
-        "Review the groomed issue and confirm before I trigger workflows."
+    get_history_store().update_chat_session(
+        session_id,
+        mode="support",
+        selected_model=selected_model,
+        updated_at=_utc_iso_now(),
+        metadata=metadata,
     )
-    if failed_csv:
-        assistant_message += f" Skipped: {failed_csv}."
 
-    return {
-        "assistant_message": assistant_message,
-        "tickets": valid_ticket_ids,
-        "queued_jobs": [],
-        "failed_tickets": failed_tickets,
-        "requires_confirmation": True,
-        "plan_id": plan_id,
-        "groomed_issue": groomed_issue,
-        "mode": "support",
-        "grooming": None,
+    jira_enrichment = {
+        "ticket_ids": valid_ticket_ids,
+        "fetched": True,
+        "missing": missing,
     }
-
-
-@router.post("/chat/message/stream")
-def chat_message_stream(payload: ChatMessageRequest):
-    def event_stream():
-        _purge_expired_plans()
-        prompt = payload.message.strip()
-        if payload.mode == "grooming":
-            yield _sse_event("status", {"message": "Collecting grooming requirements"})
-            prior_state = _normalize_grooming_state(payload.grooming_context.model_dump() if payload.grooming_context else {})
-            result = _build_grooming_response(prompt, prior_state)
-            for delta in _chunk_text(result["assistant_message"]):
-                yield _sse_event("assistant_token", {"delta": delta})
-            yield _sse_event(
-                "result",
-                {
-                    "assistant_message": result["assistant_message"],
-                    "tickets": [],
-                    "queued_jobs": [],
-                    "failed_tickets": [],
-                    "requires_confirmation": False,
-                    "plan_id": None,
-                    "groomed_issue": result["groomed_issue"],
-                    "mode": "grooming",
-                    "grooming": result["grooming"],
-                },
-            )
-            yield _sse_event("done", {})
-            return
-
-        yield _sse_event("status", {"message": "Analyzing prompt"})
-
-        ticket_ids = _extract_ticket_ids(prompt)
-        yield _sse_event("tickets", {"tickets": ticket_ids})
-
-        if not ticket_ids:
-            yield _sse_event("status", {"message": "Generating concise response"})
-            assistant_message = _respond_with_llm(prompt, payload.selected_model)
-            for delta in _chunk_text(assistant_message):
-                yield _sse_event("assistant_token", {"delta": delta})
-            yield _sse_event(
-                "result",
-                {
-                    "assistant_message": assistant_message,
-                    "tickets": [],
-                    "queued_jobs": [],
-                    "failed_tickets": [],
-                    "requires_confirmation": False,
-                    "plan_id": None,
-                    "groomed_issue": None,
-                    "mode": "support",
-                    "grooming": None,
-                },
-            )
-            yield _sse_event("done", {})
-            return
-
-        failed_tickets: list[dict] = []
-        issues: list[dict] = []
-        for ticket_id in ticket_ids:
-            yield _sse_event("status", {"message": f"Loading Jira ticket {ticket_id}"})
-            try:
-                issue = jira_service.get_issue(ticket_id)
-            except Exception as exc:  # noqa: BLE001
-                failed = {"jira_ticket_id": ticket_id, "error": str(exc)}
-                failed_tickets.append(failed)
-                yield _sse_event("ticket_failed", failed)
-                continue
-            issues.append(issue)
-
-        valid_ticket_ids = [str(issue.get("key") or "").upper() for issue in issues if issue.get("key")]
-        if not valid_ticket_ids:
-            assistant_message = "Unable to load any referenced Jira tickets. Please verify ticket IDs and Jira connectivity."
-            for delta in _chunk_text(assistant_message):
-                yield _sse_event("assistant_token", {"delta": delta})
-            yield _sse_event(
-                "result",
-                {
-                    "assistant_message": assistant_message,
-                    "tickets": ticket_ids,
-                    "queued_jobs": [],
-                    "failed_tickets": failed_tickets,
-                    "requires_confirmation": False,
-                    "plan_id": None,
-                    "groomed_issue": None,
-                    "mode": "support",
-                    "grooming": None,
-                },
-            )
-            yield _sse_event("done", {})
-            return
-
-        yield _sse_event("status", {"message": "Grooming issue details with LLM"})
-        groomed_issue = _groom_with_llm(prompt, valid_ticket_ids, issues, payload.selected_model)
-        plan_id = f"plan-{uuid4().hex}"
-        _PENDING_CHAT_PLANS[plan_id] = {
-            "created_at": _now(),
-            "expires_at": _now() + _CHAT_PLAN_TTL,
-            "prompt": prompt,
-            "repository": payload.repository,
-            "base_branch": payload.base_branch,
-            "reviewer": payload.reviewer,
-            "selected_agent": payload.selected_agent,
-            "selected_model": payload.selected_model,
-            "ticket_ids": valid_ticket_ids,
-            "issues": issues,
-            "groomed_issue": groomed_issue,
-        }
-
-        failed_csv = ", ".join(item["jira_ticket_id"] for item in failed_tickets) if failed_tickets else None
-        assistant_message = (
-            f"I groomed {len(valid_ticket_ids)} ticket(s): {', '.join(valid_ticket_ids)}. "
-            "Review the groomed issue and confirm before I trigger workflows."
-        )
-        if failed_csv:
-            assistant_message += f" Skipped: {failed_csv}."
-
-        for delta in _chunk_text(assistant_message):
-            yield _sse_event("assistant_token", {"delta": delta})
-
-        result_payload = {
-            "assistant_message": assistant_message,
-            "tickets": valid_ticket_ids,
-            "queued_jobs": [],
-            "failed_tickets": failed_tickets,
-            "requires_confirmation": True,
-            "plan_id": plan_id,
-            "groomed_issue": groomed_issue,
-            "mode": "support",
-            "grooming": None,
-        }
-        yield _sse_event("result", result_payload)
-        yield _sse_event("done", {})
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
+    assistant_text = (
+        f"I fetched Jira details for {', '.join(valid_ticket_ids)} and drafted grooming output. "
+        "Review and continue refinement before trigger."
+    )
+    assistant_message = _append_chat_message(
+        session_id=session_id,
+        role="assistant",
+        kind="text",
+        content=assistant_text,
+        payload={
+            "jira_enrichment": jira_enrichment,
+            "grooming": grooming_payload,
+            "trigger_state": metadata["trigger_state"],
         },
     )
 
-
-@router.post("/chat/cancel/{job_id}")
-def chat_cancel_job(job_id: str, _user: dict = Depends(require_run_permission)):
-    job = get_history_store().get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Orchestration job not found")
-
-    request_payload = job.get("request") or {}
-    if request_payload.get("trigger_source") != "chat":
-        raise HTTPException(status_code=409, detail="Only chat-triggered jobs can be cancelled from chat")
-
-    return cancel_orchestration(job_id)
-
-
-@router.post("/chat/confirm")
-def chat_confirm(payload: ChatConfirmRequest, _user: dict = Depends(require_run_permission)):
-    _purge_expired_plans()
-    plan = _PENDING_CHAT_PLANS.get(payload.plan_id)
-    if not plan:
-        return {
-            "assistant_message": "This grooming plan expired or does not exist. Please request grooming again.",
-            "queued_jobs": [],
-            "confirmed": False,
-        }
-
-    if not payload.confirm:
-        _PENDING_CHAT_PLANS.pop(payload.plan_id, None)
-        return {
-            "assistant_message": "Understood. I did not trigger any workflow.",
-            "queued_jobs": [],
-            "confirmed": False,
-        }
-
-    queued_jobs: list[dict] = []
-    issues_by_key = {
-        str(issue.get("key") or "").upper(): issue
-        for issue in plan.get("issues", [])
-        if issue.get("key")
-    }
-    for ticket_id in plan.get("ticket_ids", []):
-        issue = issues_by_key.get(ticket_id)
-        if not issue:
-            continue
-        run_payload = OrchestrateRequest(
-            jira_ticket_id=ticket_id,
-            repository=plan["repository"],
-            base_branch=plan["base_branch"],
-            reviewer=plan.get("reviewer"),
-            selected_agent=plan.get("selected_agent"),
-            selected_model=plan.get("selected_model"),
-            commit_message=f"feat({ticket_id.lower()}): {_first_sentence(plan['prompt'])}",
-            change_plan=_build_plan_change_plan(plan["prompt"], issue, plan.get("groomed_issue", "")),
-        )
-        queued = enqueue_orchestration(
-            run_payload,
-            request_context={
-                "trigger_source": "chat",
-                "chat_prompt": plan["prompt"],
-                "chat_ticket_ids": plan["ticket_ids"],
-                "chat_plan_id": payload.plan_id,
-            },
-        )
-        queued_jobs.append({"jira_ticket_id": ticket_id, **queued})
-
-    _PENDING_CHAT_PLANS.pop(payload.plan_id, None)
     return {
-        "assistant_message": (
-            f"Confirmed. Triggered {len(queued_jobs)} workflow run(s): "
-            + ", ".join(f"{item['jira_ticket_id']} ({item['job_id']})" for item in queued_jobs)
-        ),
-        "queued_jobs": queued_jobs,
-        "confirmed": True,
+        "session_id": session_id,
+        "assistant_message": assistant_message,
+        "jira_enrichment": jira_enrichment,
+        "grooming": grooming_payload.get("schema") or {},
+        "trigger_state": {
+            "status": metadata["trigger_state"],
+            "recommendation": "ready" if grooming_payload.get("is_complete") else "needs_input",
+        },
+        "user_message": user_message,
     }
 
 
-@router.post("/chat/grooming/assign")
-def chat_grooming_assign(payload: GroomingAssignRequest, _user: dict = Depends(require_run_permission)):
-    state = _normalize_grooming_state(payload.grooming.model_dump())
+@router.post("/chat/sessions/{session_id}/prepare-trigger")
+def prepare_chat_session_trigger(
+    session_id: str,
+    payload: ChatPrepareTriggerRequest,
+    _user: dict = Depends(require_run_permission),
+):
+    session = _chat_session_or_404(session_id)
+    _ensure_open_session(session)
+    metadata = _session_metadata(session)
+
+    state = _normalize_grooming_state(metadata.get("grooming_state") or {})
     missing = _missing_grooming_fields(state)
     if missing:
         raise HTTPException(
             status_code=422,
-            detail=f"Grooming data is incomplete. Missing fields: {', '.join(missing)}",
+            detail={
+                "code": "GROOMING_SCHEMA_INVALID",
+                "message": "Grooming data is incomplete",
+                "details": {"missing_fields": missing},
+            },
         )
+
+    client_context = metadata.get("client_context") if isinstance(metadata.get("client_context"), dict) else {}
+    repository = payload.repository or client_context.get("active_repository") or client_context.get("repository")
+    if not repository:
+        raise HTTPException(status_code=422, detail="Repository is required before trigger preparation")
+
+    base_branch = payload.base_branch or client_context.get("active_branch") or client_context.get("base_branch") or "development"
+    reviewer = payload.reviewer if payload.reviewer is not None else client_context.get("reviewer")
+    selected_agent = payload.selected_agent or client_context.get("selected_agent") or "SWE"
+    selected_model = payload.selected_model or metadata.get("model") or session.get("selected_model")
+    ticket_ids = metadata.get("last_ticket_ids") if isinstance(metadata.get("last_ticket_ids"), list) else []
+    jira_ticket_id = str(ticket_ids[0]) if ticket_ids else None
 
     run_payload, jira_prefill, template, rationale = _build_orchestration_payload_from_grooming(
         state,
-        repository=payload.repository,
-        base_branch=payload.base_branch,
-        reviewer=payload.reviewer,
-        selected_agent=payload.selected_agent,
-        selected_model=payload.selected_model,
-        jira_ticket_id=payload.jira_ticket_id,
+        repository=repository,
+        base_branch=base_branch,
+        reviewer=reviewer,
+        selected_agent=selected_agent,
+        selected_model=selected_model,
+        jira_ticket_id=jira_ticket_id,
     )
 
-    queued = enqueue_orchestration(
-        OrchestrateRequest(**run_payload),
-        request_context={
-            "trigger_source": "chat_grooming",
-            "grooming_summary": _build_groomed_markdown(state),
+    metadata["prepared_payload"] = run_payload
+    metadata["trigger_state"] = "awaiting_confirmation"
+    metadata["recommended_template"] = template
+    metadata["recommendation_rationale"] = rationale
+    metadata["jira_prefill"] = jira_prefill
+    metadata["model"] = selected_model
+
+    get_history_store().update_chat_session(
+        session_id,
+        selected_model=selected_model,
+        updated_at=_utc_iso_now(),
+        metadata=metadata,
+    )
+
+    assistant_message = _append_chat_message(
+        session_id=session_id,
+        role="assistant",
+        kind="text",
+        content="Trigger payload prepared. Review values and confirm to launch workflow.",
+        payload={
+            "orchestration_payload": run_payload,
+            "trigger_state": metadata["trigger_state"],
             "recommended_template": template,
             "recommendation_rationale": rationale,
             "jira_prefill": jira_prefill,
@@ -924,12 +806,87 @@ def chat_grooming_assign(payload: GroomingAssignRequest, _user: dict = Depends(r
     )
 
     return {
-        "assistant_message": (
-            f"Assigned to {template} flow and queued orchestration job {queued['job_id']}."
-        ),
+        "session_id": session_id,
+        "assistant_message": assistant_message,
+        "orchestration_payload": run_payload,
         "recommended_template": template,
         "recommendation_rationale": rationale,
         "jira_prefill": jira_prefill,
-        "orchestration_payload": run_payload,
-        "queued_job": {"jira_ticket_id": run_payload["jira_ticket_id"], **queued},
+        "trigger_state": {"status": metadata["trigger_state"], "recommendation": "ready"},
     }
+
+
+@router.post("/chat/sessions/{session_id}/confirm-trigger")
+def confirm_chat_session_trigger(
+    session_id: str,
+    payload: ChatConfirmTriggerRequest,
+    _user: dict = Depends(require_run_permission),
+):
+    session = _chat_session_or_404(session_id)
+    _ensure_open_session(session)
+    metadata = _session_metadata(session)
+
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "TRIGGER_CONFIRMATION_REQUIRED", "message": "confirm=true is required"},
+        )
+
+    prepared_payload = metadata.get("prepared_payload")
+    if not isinstance(prepared_payload, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TRIGGER_CONFIRMATION_REQUIRED",
+                "message": "Prepare trigger payload before confirmation",
+            },
+        )
+
+    if metadata.get("trigger_state") == "triggered":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TRIGGER_ALREADY_CONFIRMED", "message": "Session already triggered"},
+        )
+
+    trigger_confirmation_id = f"confirm-{uuid4().hex}"
+    queued = enqueue_orchestration(
+        OrchestrateRequest(**prepared_payload),
+        request_context={
+            "trigger_source": "chat_session",
+            "chat_session_id": session_id,
+            "chat_confirmation_id": trigger_confirmation_id,
+            "idempotency_key": payload.idempotency_key,
+        },
+    )
+
+    metadata["trigger_state"] = "triggered"
+    metadata["queued_job"] = queued
+    metadata["trigger_confirmation_id"] = trigger_confirmation_id
+    get_history_store().update_chat_session(
+        session_id,
+        updated_at=_utc_iso_now(),
+        metadata=metadata,
+    )
+
+    _append_chat_message(
+        session_id=session_id,
+        role="assistant",
+        kind="text",
+        content=f"Confirmed. Workflow queued with job {queued['job_id']}.",
+        payload={"queued_job": queued, "trigger_confirmation_id": trigger_confirmation_id},
+    )
+
+    return {
+        "session_id": session_id,
+        "trigger_confirmation_id": trigger_confirmation_id,
+        "job": {"job_id": queued["job_id"], "status": queued["status"]},
+    }
+
+
+@router.delete("/chat/sessions/{session_id}")
+def archive_chat_session(session_id: str, _user: dict = Depends(require_run_permission)):
+    _chat_session_or_404(session_id)
+    archived = get_history_store().archive_chat_session(session_id, _utc_iso_now())
+    if not archived:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {"session_id": session_id, "status": "closed"}

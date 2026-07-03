@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { assignGroomingFlow } from './services/chat'
+import {
+  archiveChatSession,
+  confirmChatSessionTrigger,
+  createChatSession,
+  getChatSessionMessages,
+  listChatSessions,
+  prepareChatSessionTrigger,
+  sendChatSessionMessage,
+} from './services/chat'
 
-const CHAT_STORAGE_KEY = 'agentflow.chat.sessions.v1'
 const CHAT_LAUNCHER_POS_KEY = 'agentflow.chat.launcher.position.v1'
 const MAX_CHAT_SESSIONS = 5
 
@@ -16,19 +23,46 @@ const createInitialAssistantMessage = () => ({
 
 const createSession = () => ({
   id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  remoteId: null,
+  remoteLoaded: true,
   title: 'New Chat',
+  status: 'open',
+  triggerState: 'draft',
   updatedAt: Date.now(),
   grooming: null,
   messages: [createInitialAssistantMessage()],
 })
 
-const parseApiPayload = (raw) => {
-  if (!raw) return {}
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return { detail: raw }
-  }
+const toLocalTimestamp = (value) => {
+  if (!value) return Date.now()
+  const parsed = Date.parse(value)
+  if (Number.isNaN(parsed)) return Date.now()
+  return parsed
+}
+
+const mapRemoteMessage = (message) => ({
+  id: message.id,
+  role: message.role === 'assistant' ? 'assistant' : 'user',
+  kind: message.kind || 'text',
+  createdAt: toLocalTimestamp(message.created_at),
+  content: message.content || '',
+  payload: message.payload || null,
+})
+
+const formatTimeAgo = (timestampMs) => {
+  if (!timestampMs) return 'just now'
+  const deltaMs = Date.now() - timestampMs
+  const deltaMin = Math.max(1, Math.floor(deltaMs / 60000))
+  if (deltaMin < 60) return `${deltaMin}m ago`
+  const deltaHours = Math.floor(deltaMin / 60)
+  if (deltaHours < 24) return `${deltaHours}h ago`
+  const deltaDays = Math.floor(deltaHours / 24)
+  return `${deltaDays}d ago`
+}
+
+const triggerStateLabel = (state) => {
+  const value = String(state || 'draft').replace(/_/g, ' ')
+  return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
 export default function ChatConsole({
@@ -61,6 +95,30 @@ export default function ChatConsole({
   const [streamPhases, setStreamPhases] = useState([])
   const listRef = useRef(null)
 
+  const ensureRemoteSession = async () => {
+    const current = sessions.find((item) => item.id === activeSessionId)
+    if (!current) {
+      throw new Error('No active chat session available')
+    }
+    if (current.remoteId) return current.remoteId
+
+    const created = await createChatSession({
+      title: current.title,
+      mode: chatMode,
+      model: selectedModel || null,
+      client_context: {
+        active_repository: repository,
+        active_branch: 'development',
+        reviewer: reviewer || null,
+        selected_agent: selectedAgent || null,
+      },
+    })
+
+    const remoteId = created.session_id
+    updateActiveSession((session) => ({ ...session, remoteId }))
+    return remoteId
+  }
+
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) || null,
     [sessions, activeSessionId]
@@ -89,11 +147,7 @@ export default function ChatConsole({
       : (limited[0]?.id || '')
     setActiveSessionId(effectiveActiveId)
 
-    try {
-      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(limited))
-    } catch {
-      return
-    }
+    return
   }
 
   const updateActiveSession = (updater) => {
@@ -108,11 +162,6 @@ export default function ChatConsole({
           title: firstUserMessage ? firstUserMessage.content.slice(0, 40) : (updated.title || 'New Chat'),
         }
       })
-      try {
-        localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(next.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, MAX_CHAT_SESSIONS)))
-      } catch {
-        return next
-      }
       return next
     })
   }
@@ -128,22 +177,19 @@ export default function ChatConsole({
 
   const assignGrooming = async (messageId, groomingPayload) => {
     if (!groomingPayload || !groomingPayload.schema || isAssigning) return
+    if (!activeSessionId) return
     setIsAssigning(true)
     setChatError('')
 
     try {
-      const data = await assignGroomingFlow({
-        grooming: groomingPayload.schema,
+      const remoteId = await ensureRemoteSession()
+      const prepared = await prepareChatSessionTrigger(remoteId, {
         repository,
         base_branch: 'development',
         reviewer: reviewer || null,
         selected_agent: selectedAgent || null,
         selected_model: selectedModel || null,
       })
-
-      if (data?.queued_job) {
-        onJobsQueued([data.queued_job])
-      }
 
       updateActiveSession((session) => ({
         ...session,
@@ -152,7 +198,7 @@ export default function ChatConsole({
             ? {
                 ...message,
                 resolved: true,
-                assignedJob: data?.queued_job || null,
+                preparedPayload: prepared?.orchestration_payload || null,
               }
             : message
         ),
@@ -163,11 +209,14 @@ export default function ChatConsole({
         messages: [
           ...session.messages,
           {
-            id: `assistant-assign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            id: `assistant-prepare-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             role: 'assistant',
-            kind: 'text',
+            kind: 'session_confirmation',
             createdAt: Date.now(),
-            content: data?.assistant_message || 'Grooming assignment queued.',
+            resolved: false,
+            remoteSessionId: remoteId,
+            content: prepared?.assistant_message?.content || 'Trigger payload prepared. Confirm launch.',
+            payload: prepared?.orchestration_payload || null,
           },
         ],
       }))
@@ -179,41 +228,115 @@ export default function ChatConsole({
   }
 
   const deleteSession = (sessionId) => {
-    const next = sessions.filter((session) => session.id !== sessionId)
-    if (next.length === 0) {
-      const replacement = createSession()
-      persistSessions([replacement], replacement.id)
-      return
-    }
-    const nextActive = sessionId === activeSessionId ? next[0].id : activeSessionId
-    persistSessions(next, nextActive)
+    const current = sessions.find((session) => session.id === sessionId)
+    Promise.resolve()
+      .then(async () => {
+        if (current?.remoteId) {
+          await archiveChatSession(current.remoteId)
+        }
+      })
+      .finally(() => {
+        const next = sessions.filter((session) => session.id !== sessionId)
+        if (next.length === 0) {
+          const replacement = createSession()
+          persistSessions([replacement], replacement.id)
+          return
+        }
+        const nextActive = sessionId === activeSessionId ? next[0].id : activeSessionId
+        persistSessions(next, nextActive)
+      })
   }
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(CHAT_STORAGE_KEY)
-      if (!raw) {
+    let alive = true
+    const load = async () => {
+      try {
+        const remote = await listChatSessions(MAX_CHAT_SESSIONS)
+        if (!alive) return
+
+        if (Array.isArray(remote) && remote.length > 0) {
+          const mapped = remote.slice(0, MAX_CHAT_SESSIONS).map((session) => ({
+            id: `session-${session.id}`,
+            remoteId: session.id,
+            remoteLoaded: false,
+            title: session.title || 'Chat',
+            status: session.status || 'open',
+            triggerState: session?.metadata?.trigger_state || 'draft',
+            updatedAt: toLocalTimestamp(session.updated_at),
+            grooming: session?.metadata?.grooming_state
+              ? {
+                  schema: {
+                    problem: session.metadata.grooming_state.problem || '',
+                    user_impact: session.metadata.grooming_state.user_impact || '',
+                    goals: session.metadata.grooming_state.goals || [],
+                    constraints: session.metadata.grooming_state.constraints || [],
+                    acceptance_criteria: session.metadata.grooming_state.acceptance_criteria || [],
+                  },
+                  pending_field: session.metadata.grooming_state.pending_field || null,
+                  missing_fields: [],
+                }
+              : null,
+            messages: [createInitialAssistantMessage()],
+          }))
+          setSessions(mapped)
+          setActiveSessionId(mapped[0].id)
+          return
+        }
+      } catch {
+        if (!alive) return
         const fresh = createSession()
         setSessions([fresh])
         setActiveSessionId(fresh.id)
-        return
       }
-      const parsed = JSON.parse(raw)
-      const loaded = Array.isArray(parsed) ? parsed.slice(0, MAX_CHAT_SESSIONS) : []
-      if (loaded.length === 0) {
-        const fresh = createSession()
-        setSessions([fresh])
-        setActiveSessionId(fresh.id)
-        return
-      }
-      setSessions(loaded)
-      setActiveSessionId(loaded[0].id)
-    } catch {
-      const fresh = createSession()
-      setSessions([fresh])
-      setActiveSessionId(fresh.id)
+    }
+
+    load()
+    return () => {
+      alive = false
     }
   }, [])
+
+  useEffect(() => {
+    const current = sessions.find((session) => session.id === activeSessionId)
+    if (!current?.remoteId || current.remoteLoaded) return
+
+    let alive = true
+    getChatSessionMessages(current.remoteId)
+      .then((messagesPayload) => {
+        if (!alive) return
+        const mappedMessages = Array.isArray(messagesPayload) && messagesPayload.length > 0
+          ? messagesPayload.map(mapRemoteMessage)
+          : [createInitialAssistantMessage()]
+
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === activeSessionId
+              ? {
+                  ...session,
+                  remoteLoaded: true,
+                  messages: mappedMessages,
+                  status: 'open',
+                  updatedAt: Date.now(),
+                }
+              : session
+          )
+        )
+      })
+      .catch(() => {
+        if (!alive) return
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === activeSessionId
+              ? { ...session, remoteLoaded: true }
+              : session
+          )
+        )
+      })
+
+    return () => {
+      alive = false
+    }
+  }, [sessions, activeSessionId])
 
   useEffect(() => {
     try {
@@ -275,14 +398,6 @@ export default function ChatConsole({
 
   const appendAssistantDelta = (assistantId, delta) => {
     if (!delta) return
-    updateActiveSession((session) => ({
-      ...session,
-      messages: session.messages.map((message) =>
-        message.id === assistantId
-          ? { ...message, content: `${message.content || ''}${delta}` }
-          : message
-      ),
-    }))
   }
 
   const setAssistantText = (assistantId, text) => {
@@ -312,84 +427,6 @@ export default function ChatConsole({
     })
   }
 
-  const processStreamingResponse = async (response, assistantId) => {
-    if (!response.body) {
-      throw new Error('Streaming not supported in this browser')
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let finalResult = null
-
-    const handleEvent = (eventName, eventData) => {
-      if (eventName === 'status') {
-        const label = eventData?.message || ''
-        setStreamStatus(label)
-        addPhase(label)
-      }
-      if (eventName === 'tickets') {
-        const tickets = Array.isArray(eventData?.tickets) ? eventData.tickets : []
-        const label = tickets.length > 0 ? `Found ${tickets.length} ticket(s): ${tickets.join(', ')}` : 'No Jira ticket found in prompt'
-        setStreamStatus(label)
-        addPhase(label)
-      }
-      if (eventName === 'queued_job') {
-        const label = `Queued workflow for ${eventData?.jira_ticket_id || 'ticket'}`
-        setStreamStatus(label)
-        addPhase(label)
-      }
-      if (eventName === 'ticket_failed') {
-        const label = `Skipped ${eventData?.jira_ticket_id || 'ticket'} due to Jira lookup error`
-        setStreamStatus(label)
-        addPhase(label)
-      }
-      if (eventName === 'assistant_token') {
-        appendAssistantDelta(assistantId, eventData?.delta || '')
-      }
-      if (eventName === 'result') {
-        finalResult = eventData
-        addPhase('Completed response generation')
-      }
-      if (eventName === 'done') {
-        setStreamStatus('')
-      }
-    }
-
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const parts = buffer.split('\n\n')
-      buffer = parts.pop() || ''
-
-      for (const block of parts) {
-        const lines = block.split('\n')
-        let eventName = 'message'
-        const dataLines = []
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            eventName = line.slice(6).trim()
-          } else if (line.startsWith('data:')) {
-            dataLines.push(line.slice(5).trim())
-          }
-        }
-        if (dataLines.length === 0) continue
-
-        let payload = {}
-        try {
-          payload = JSON.parse(dataLines.join('\n'))
-        } catch {
-          payload = {}
-        }
-        handleEvent(eventName, payload)
-      }
-    }
-
-    return finalResult
-  }
-
   const sendMessage = async (event) => {
     event.preventDefault()
     if (!canSend) return
@@ -397,8 +434,8 @@ export default function ChatConsole({
     const userMessage = draft.trim()
     setDraft('')
     setChatError('')
-    setStreamStatus('Connecting...')
-    setStreamPhases([{ id: `phase-${Date.now()}`, label: 'Connecting...' }])
+    setStreamStatus('Processing message...')
+    setStreamPhases([{ id: `phase-${Date.now()}`, label: 'Processing message...' }])
     setIsSending(true)
 
     const userId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -414,42 +451,41 @@ export default function ChatConsole({
     }))
 
     try {
-      const response = await fetch('/api/chat/message/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: userMessage,
-          mode: chatMode,
-          repository,
-          base_branch: 'development',
+      const remoteId = await ensureRemoteSession()
+      addPhase('Sending to session API')
+      const data = await sendChatSessionMessage(remoteId, {
+        message: userMessage,
+        mode: chatMode,
+        model: selectedModel || null,
+        client_context: {
+          active_repository: repository,
+          active_branch: 'development',
           reviewer: reviewer || null,
-          selected_agent: selectedAgent,
-          selected_model: selectedModel || null,
-          grooming_context: activeGrooming
-            ? {
-                ...activeGrooming.schema,
-                pending_field: activeGrooming.pending_field || null,
-              }
-            : null,
-        }),
+          selected_agent: selectedAgent || null,
+        },
       })
 
-      if (!response.ok) {
-        const raw = await response.text()
-        const data = parseApiPayload(raw)
-        throw new Error(data.detail || 'Chat request failed')
-      }
+      const groomingSchema = data?.grooming && typeof data.grooming === 'object' ? data.grooming : null
+      const missingFields = Array.isArray(data?.assistant_message?.payload?.grooming?.missing_fields)
+        ? data.assistant_message.payload.grooming.missing_fields
+        : []
+      const isComplete = missingFields.length === 0 && Boolean(groomingSchema)
 
-      const data = await processStreamingResponse(response, assistantId)
-      const queuedJobs = Array.isArray(data?.queued_jobs) ? data.queued_jobs : []
-      if (queuedJobs.length > 0) {
-        onJobsQueued(queuedJobs)
-      }
-
-      if (data?.mode === 'grooming' && data?.grooming) {
+      if (chatMode === 'grooming' && groomingSchema) {
         updateActiveSession((session) => ({
           ...session,
-          grooming: data.grooming,
+          triggerState: data?.trigger_state?.status || session.triggerState || 'grooming',
+          grooming: {
+            schema: groomingSchema,
+            missing_fields: missingFields,
+            is_complete: isComplete,
+            recommended_template:
+              data?.assistant_message?.payload?.grooming?.recommended_template ||
+              (data?.assistant_message?.payload?.trigger_state === 'ready_to_trigger' ? 'feature' : null),
+            recommendation_rationale: data?.assistant_message?.payload?.grooming?.recommendation_rationale || '',
+            pending_field: data?.assistant_message?.payload?.grooming?.pending_field || null,
+            follow_up_question: data?.assistant_message?.payload?.grooming?.follow_up_question || null,
+          },
           messages: [
             ...session.messages,
             {
@@ -458,39 +494,30 @@ export default function ChatConsole({
               kind: 'grooming_review',
               createdAt: Date.now(),
               resolved: false,
-              content: data.groomed_issue || 'Grooming summary updated.',
-              grooming: data.grooming,
+              content: JSON.stringify(groomingSchema, null, 2),
+              grooming: {
+                schema: groomingSchema,
+                missing_fields: missingFields,
+                is_complete: isComplete,
+                recommended_template: data?.assistant_message?.payload?.grooming?.recommended_template || 'feature',
+                recommendation_rationale: data?.assistant_message?.payload?.grooming?.recommendation_rationale || '',
+                follow_up_question: data?.assistant_message?.payload?.grooming?.follow_up_question || null,
+              },
             },
           ],
         }))
       }
 
-      if (data?.requires_confirmation && data?.plan_id) {
-        const confirmId = `confirm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-        updateActiveSession((session) => ({
-          ...session,
-          messages: [
-            ...session.messages,
-            {
-              id: confirmId,
-              role: 'assistant',
-              kind: 'confirmation',
-              createdAt: Date.now(),
-              resolved: false,
-              content: 'Review this groomed issue and confirm workflow trigger.',
-              planId: data.plan_id,
-              tickets: Array.isArray(data.tickets) ? data.tickets : [],
-              groomedIssue: data.groomed_issue || '',
-            },
-          ],
-        }))
-      }
-
-      if ((data?.assistant_message || '').trim()) {
-        setAssistantText(assistantId, data.assistant_message)
+      if ((data?.assistant_message?.content || '').trim()) {
+        setAssistantText(assistantId, data.assistant_message.content)
       } else {
         setAssistantText(assistantId, 'Done.')
       }
+      updateActiveSession((session) => ({
+        ...session,
+        triggerState: data?.trigger_state?.status || session.triggerState || 'draft',
+      }))
+      addPhase('Completed response generation')
     } catch (err) {
       setChatError(err.message)
       addPhase('Request failed')
@@ -520,129 +547,48 @@ export default function ChatConsole({
     }
   }
 
-  const confirmPlan = async (planId, confirm, messageId) => {
-    if (!planId) return
+  const confirmSessionTrigger = async (messageId, remoteSessionId, confirm) => {
+    if (!remoteSessionId || isConfirming) return
 
     setIsConfirming(true)
     setChatError('')
-
-    const assistantId = `assistant-confirm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const userDecisionId = `user-decision-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-    updateActiveSession((session) => ({
-      ...session,
-      messages: [
-        ...session.messages.map((message) =>
-          message.id === messageId ? { ...message, resolved: true } : message
-        ),
-        {
-          id: userDecisionId,
-          role: 'user',
-          kind: 'text',
-          createdAt: Date.now(),
-          content: confirm ? 'Confirm and trigger workflow' : 'Cancel this workflow request',
-        },
-        {
-          id: assistantId,
-          role: 'assistant',
-          kind: 'text',
-          createdAt: Date.now(),
-          content: '',
-        },
-      ],
-    }))
-
     try {
-      const response = await fetch('/api/chat/confirm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan_id: planId, confirm }),
+      if (!confirm) {
+        updateActiveSession((session) => ({
+          ...session,
+          triggerState: 'ready_to_trigger',
+          messages: session.messages.map((msg) =>
+            msg.id === messageId ? { ...msg, resolved: true, content: 'Trigger cancelled.' } : msg
+          ),
+        }))
+        return
+      }
+
+      const data = await confirmChatSessionTrigger(remoteSessionId, {
+        confirm: true,
+        idempotency_key: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       })
-      const raw = await response.text()
-      const data = parseApiPayload(raw)
-      if (!response.ok) {
-        throw new Error(data.detail || 'Failed to confirm grooming plan')
+      const job = data?.job
+      if (job?.job_id) {
+        onJobsQueued([{ job_id: job.job_id, status: job.status || 'queued', jira_ticket_id: 'SESSION' }])
       }
-
-      if (confirm) {
-        const queuedJobs = Array.isArray(data.queued_jobs) ? data.queued_jobs : []
-        if (queuedJobs.length > 0) {
-          onJobsQueued(queuedJobs)
-          updateActiveSession((session) => ({
-            ...session,
-            messages: [
-              ...session.messages,
-              {
-                id: `job-controls-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                role: 'assistant',
-                kind: 'job_controls',
-                createdAt: Date.now(),
-                content: 'Workflow jobs started. You can cancel any job below.',
-                jobs: queuedJobs.map((job) => ({
-                  ...job,
-                  status: 'queued',
-                })),
-              },
-            ],
-          }))
-        }
-      }
-
-      setAssistantText(assistantId, data.assistant_message || (confirm ? 'Confirmed.' : 'Cancelled.'))
+      updateActiveSession((session) => ({
+        ...session,
+        triggerState: 'triggered',
+        messages: session.messages.map((msg) =>
+          msg.id === messageId
+            ? {
+                ...msg,
+                resolved: true,
+                content: `Confirmed. Workflow queued with job ${job?.job_id || '-'}.`,
+              }
+            : msg
+        ),
+      }))
     } catch (err) {
       setChatError(err.message)
-      setAssistantText(assistantId, 'I could not process your confirmation right now.')
     } finally {
       setIsConfirming(false)
-    }
-  }
-
-  const cancelChatJob = async (messageId, jobId) => {
-    updateActiveSession((session) => ({
-      ...session,
-      messages: session.messages.map((message) => {
-        if (message.id !== messageId || message.kind !== 'job_controls') return message
-        return {
-          ...message,
-          jobs: (message.jobs || []).map((job) =>
-            job.job_id === jobId ? { ...job, status: 'cancelling' } : job
-          ),
-        }
-      }),
-    }))
-
-    try {
-      const response = await fetch(`/api/chat/cancel/${jobId}`, { method: 'POST' })
-      const raw = await response.text()
-      const data = parseApiPayload(raw)
-      if (!response.ok) throw new Error(data.detail || 'Failed to cancel job')
-
-      updateActiveSession((session) => ({
-        ...session,
-        messages: session.messages.map((message) => {
-          if (message.id !== messageId || message.kind !== 'job_controls') return message
-          return {
-            ...message,
-            jobs: (message.jobs || []).map((job) =>
-              job.job_id === jobId ? { ...job, status: data.status || 'cancelled' } : job
-            ),
-          }
-        }),
-      }))
-    } catch (err) {
-      setChatError(err.message)
-      updateActiveSession((session) => ({
-        ...session,
-        messages: session.messages.map((message) => {
-          if (message.id !== messageId || message.kind !== 'job_controls') return message
-          return {
-            ...message,
-            jobs: (message.jobs || []).map((job) =>
-              job.job_id === jobId ? { ...job, status: 'error' } : job
-            ),
-          }
-        }),
-      }))
     }
   }
 
@@ -706,7 +652,14 @@ export default function ChatConsole({
                   className="chat-session-item"
                   onClick={() => setActiveSessionId(session.id)}
                 >
-                  <span>{session.title || 'Chat'}</span>
+                  <span className="chat-session-title">{session.title || 'Chat'}</span>
+                  <span className="chat-session-meta-row">
+                    <span className={`chat-session-badge chat-session-badge--${session.status === 'closed' ? 'closed' : 'open'}`}>
+                      {session.status === 'closed' ? 'Closed' : 'Open'}
+                    </span>
+                    <span className="chat-session-trigger">{triggerStateLabel(session.triggerState)}</span>
+                  </span>
+                  <span className="chat-session-updated">Updated {formatTimeAgo(session.updatedAt)}</span>
                 </button>
                 <button
                   type="button"
@@ -730,47 +683,6 @@ export default function ChatConsole({
                   <header>{message.role === 'assistant' ? 'Copilot' : 'You'}</header>
                   <p>{message.content}</p>
 
-                  {message.kind === 'confirmation' && !message.resolved && (
-                    <div className="chat-inline-confirm">
-                      <p><strong>Tickets:</strong> {(message.tickets || []).join(', ')}</p>
-                      <pre>{message.groomedIssue || 'No groomed issue text available.'}</pre>
-                      <div className="chat-confirm-actions">
-                        <button
-                          type="button"
-                          onClick={() => confirmPlan(message.planId, true, message.id)}
-                          disabled={isConfirming}
-                        >
-                          {isConfirming ? 'Processing...' : 'Confirm and Trigger Workflow'}
-                        </button>
-                        <button
-                          type="button"
-                          className="chat-confirm-cancel"
-                          onClick={() => confirmPlan(message.planId, false, message.id)}
-                          disabled={isConfirming}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {message.kind === 'job_controls' && (
-                    <div className="chat-job-controls">
-                      {(message.jobs || []).map((job) => (
-                        <div key={job.job_id} className="chat-job-row">
-                          <span>{job.jira_ticket_id} ({job.status || 'queued'})</span>
-                          <button
-                            type="button"
-                            onClick={() => cancelChatJob(message.id, job.job_id)}
-                            disabled={['cancelled', 'cancelling', 'success', 'failed'].includes(String(job.status || '').toLowerCase())}
-                          >
-                            {String(job.status || '').toLowerCase() === 'cancelling' ? 'Cancelling...' : 'Cancel'}
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
                   {message.kind === 'grooming_review' && (
                     <div className="chat-grooming-review">
                       <pre>{message.content || 'No grooming summary available.'}</pre>
@@ -786,10 +698,34 @@ export default function ChatConsole({
                             onClick={() => assignGrooming(message.id, message.grooming)}
                             disabled={isAssigning || message.resolved}
                           >
-                            {isAssigning ? 'Assigning...' : (message.resolved ? 'Assigned' : 'Assign to Agent and Launch')}
+                            {isAssigning ? 'Preparing...' : (message.resolved ? 'Prepared' : 'Prepare Trigger')}
                           </button>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {message.kind === 'session_confirmation' && !message.resolved && (
+                    <div className="chat-inline-confirm">
+                      <p><strong>Prepared payload:</strong></p>
+                      <pre>{JSON.stringify(message.payload || {}, null, 2)}</pre>
+                      <div className="chat-confirm-actions">
+                        <button
+                          type="button"
+                          onClick={() => confirmSessionTrigger(message.id, message.remoteSessionId, true)}
+                          disabled={isConfirming}
+                        >
+                          {isConfirming ? 'Processing...' : 'Confirm and Trigger Workflow'}
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-confirm-cancel"
+                          onClick={() => confirmSessionTrigger(message.id, message.remoteSessionId, false)}
+                          disabled={isConfirming}
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                   )}
                 </article>

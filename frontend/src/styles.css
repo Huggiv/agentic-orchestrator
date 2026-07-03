@@ -1857,9 +1857,53 @@ button:hover {
   box-shadow: none;
   padding: 0.45rem 0.55rem;
   font-size: 0.78rem;
+  display: grid;
+  gap: 0.24rem;
+  overflow: hidden;
+}
+
+.chat-session-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-session-meta-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.chat-session-badge {
+  font-size: 0.62rem;
+  line-height: 1;
+  border-radius: 999px;
+  padding: 0.16rem 0.38rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid transparent;
+}
+
+.chat-session-badge--open {
+  background: #082f1f;
+  border-color: #2a7f58;
+  color: #b7f8d8;
+}
+
+.chat-session-badge--closed {
+  background: #3f1d1d;
+  border-color: #a24b4b;
+  color: #ffc4c4;
+}
+
+.chat-session-trigger {
+  font-size: 0.65rem;
+  color: #9ec5ea;
+}
+
+.chat-session-updated {
+  font-size: 0.62rem;
+  color: #8ab3d9;
 }
 
 .chat-session-delete {

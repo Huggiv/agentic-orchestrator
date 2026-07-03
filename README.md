@@ -201,6 +201,56 @@ Sample request:
 }
 ```
 
+### Chat Sessions
+
+Session-first chat API:
+
+- `POST /api/chat/sessions`
+- `GET /api/chat/sessions?limit=30`
+- `GET /api/chat/sessions/{session_id}`
+- `GET /api/chat/sessions/{session_id}/messages`
+- `POST /api/chat/sessions/{session_id}/messages`
+- `POST /api/chat/sessions/{session_id}/prepare-trigger`
+- `POST /api/chat/sessions/{session_id}/confirm-trigger`
+- `DELETE /api/chat/sessions/{session_id}`
+
+`POST /api/chat/sessions/{session_id}/messages` request example:
+
+```json
+{
+  "message": "Please groom AGENT_FLOW-245 for next sprint",
+  "model": "gpt-5.3-codex",
+  "mode": "interactive",
+  "client_context": {
+    "active_repository": "owner/repo",
+    "active_branch": "development"
+  }
+}
+```
+
+`POST /api/chat/sessions/{session_id}/confirm-trigger` response example:
+
+```json
+{
+  "session_id": "chat_123",
+  "trigger_confirmation_id": "confirm_123",
+  "job": {
+    "job_id": "job_123",
+    "status": "queued"
+  }
+}
+```
+
+Legacy endpoint timeline:
+
+- Introduced deprecation headers: 2026-07-03
+- Hard cutover and removal from active docs: 2026-07-03
+- Removed endpoints:
+  - `POST /api/chat/message`
+  - `POST /api/chat/message/stream`
+  - `POST /api/chat/confirm`
+  - `POST /api/chat/grooming/assign`
+
 ## Execution Flow
 
 1. Fetch Jira issues and select ticket.

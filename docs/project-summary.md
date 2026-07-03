@@ -1,13 +1,13 @@
 ---
 title: AGENT_FLOW Agentic Orchestrator - Project Summary
-date: 2026-06-24
-version: 1.0
+date: 2026-07-03
+version: 1.1
 audience: Engineering Team, Architects, Stakeholders
 ---
 
 # 1. Executive Summary
 
-AGENT_FLOW Agentic Orchestrator is a two-container application that automates Jira-driven software delivery workflows. It combines a FastAPI backend with a React + Vite frontend to trigger, monitor, and persist end-to-end orchestration runs. A run fetches Jira context, clones a target repository, invokes Copilot CLI for agentic implementation guidance, creates commits/branches, and opens GitHub pull requests. The system persists run history and progress events in SQLite so users can inspect active and completed jobs. It is designed for on-prem Jira compatibility and headless operation using token-based authentication.
+AGENT_FLOW Agentic Orchestrator is a two-container application that automates Jira-driven software delivery workflows. It combines a FastAPI backend with a React + Vite frontend to trigger, monitor, and persist end-to-end orchestration runs. A run fetches Jira context, clones a target repository, invokes Copilot CLI for agentic implementation guidance, creates commits/branches, and opens GitHub pull requests. The system persists run history, progress events, and chat sessions in SQLite so users can inspect active and completed jobs and continue Copilot-like conversations across page reloads. It is designed for on-prem Jira compatibility and headless operation using token-based authentication.
 
 # 2. Architecture Overview
 
@@ -49,8 +49,9 @@ The system has one primary runtime boundary: the orchestrator stack (frontend + 
 |---|---|---|
 | `app.main` | FastAPI bootstrapping, `.env` loading, CORS setup, router registration | `app`, `_load_environment()` |
 | `app.routers.orchestrate` | Job API, background thread lifecycle, status/history endpoints | `orchestrate()`, `orchestrate_status()`, `orchestrate_history()` |
+| `app.routers.chat` | Session-first chatbot APIs, Jira-aware grooming, trigger preparation and confirmation | `create_chat_session()`, `send_chat_session_message()`, `prepare_chat_session_trigger()`, `confirm_chat_session_trigger()` |
 | `app.orchestration` | Full agentic workflow execution and external integration | `run_orchestration()` |
-| `app.history_store` | SQLite schema, job/progress persistence, retention cleanup | `HistoryStore`, `get_history_store()` |
+| `app.history_store` | SQLite schema, job/progress/chat-session persistence, retention cleanup | `HistoryStore`, `get_history_store()` |
 | `app.routers.jira` | Jira endpoint wrappers and HTTP error mapping | `list_issues()`, `get_issue()` |
 | `app.jira.service` | Jira retrieval + response shaping with filter config | `get_issues()`, `get_issue()` |
 | `app.jira.client` | Jira client factory and auth/config validation | `get_client()` |
@@ -61,6 +62,8 @@ The system has one primary runtime boundary: the orchestrator stack (frontend + 
 | Component | Responsibility | Key Behaviors |
 |---|---|---|
 | `src/App.jsx` | Main orchestration console, run trigger, polling, history rendering | Trigger form, result panels, artifact modal |
+| `src/ChatConsole.jsx` | Copilot-like session chat UI with grooming and trigger confirmation | Session list, conversation timeline, trigger-state visibility |
+| `src/services/chat.js` | Chat session API client module | Session create/list/messages/prepare/confirm/archive calls |
 | `src/FlowDiagram.jsx` | Stage visualization for runtime progress | Step-state resolution, status legends, custom icons |
 | `vite.config.js` | Dev server proxy to backend service | `/api`, `/health` forwarding |
 
@@ -143,6 +146,45 @@ Each issue includes:
 | `name` | string | Stage identifier (`clone_repository`, `create_pr`, etc.) |
 | `status` | string | Stage state (`running`, `success`, `failed`, `skipped`) |
 | `details` | string/null | Optional contextual detail |
+
+## Chat Sessions
+
+- Create session: `POST /api/chat/sessions`
+- List sessions: `GET /api/chat/sessions?limit=<1..100>`
+- Get one session: `GET /api/chat/sessions/{session_id}`
+- List session messages: `GET /api/chat/sessions/{session_id}/messages`
+- Send message: `POST /api/chat/sessions/{session_id}/messages`
+- Prepare trigger payload: `POST /api/chat/sessions/{session_id}/prepare-trigger`
+- Confirm workflow trigger: `POST /api/chat/sessions/{session_id}/confirm-trigger`
+- Archive session: `DELETE /api/chat/sessions/{session_id}`
+
+### Send Message Request (Session API)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `message` | string | Yes | User message text |
+| `model` | string/null | No | Explicit model override |
+| `mode` | string | No | `interactive`, `support`, or `grooming` |
+| `client_context` | object | No | Frontend context (repository, branch, reviewer, agent) |
+
+### Send Message Response (Session API)
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | string | Chat session identifier |
+| `assistant_message` | object | Assistant message object (`id`, `role`, `content`, `created_at`, `payload`) |
+| `jira_enrichment` | object | Jira enrichment status (`ticket_ids`, `fetched`, `missing`) |
+| `grooming` | object | Structured grooming schema (`problem`, `user_impact`, `goals`, `constraints`, `acceptance_criteria`) |
+| `trigger_state` | object | Trigger progress state for the session |
+| `user_message` | object | Persisted user message object |
+
+### Trigger Confirmation Response (Session API)
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | string | Chat session identifier |
+| `trigger_confirmation_id` | string | Confirmation event identifier |
+| `job` | object | Queued orchestration job (`job_id`, `status`) |
 
 # 6. Infrastructure & Deployment
 

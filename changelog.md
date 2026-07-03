@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.0] - 2026-07-03
+
+### Added
+
+- Session-first chat API endpoints:
+	- POST /api/chat/sessions
+	- GET /api/chat/sessions
+	- GET /api/chat/sessions/{session_id}
+	- GET /api/chat/sessions/{session_id}/messages
+	- POST /api/chat/sessions/{session_id}/messages
+	- POST /api/chat/sessions/{session_id}/prepare-trigger
+	- POST /api/chat/sessions/{session_id}/confirm-trigger
+	- DELETE /api/chat/sessions/{session_id}
+- SQLite persistence for chat sessions and chat messages in HistoryStore.
+- Chat session metadata visibility in frontend sidebar: session status badge, trigger state label, and last-updated indicator.
+
+### Changed
+
+- Chat flow now uses session-first APIs for conversation continuity, Jira-aware grooming context, and explicit trigger confirmation.
+- Chat trigger flow now uses a prepare-then-confirm orchestration sequence per active session.
+- Project and README documentation now reflect session-first chat contracts and cutover timeline.
+
+### Removed
+
+- Legacy chat endpoints removed after hard cutover:
+	- POST /api/chat/message
+	- POST /api/chat/message/stream
+	- POST /api/chat/confirm
+	- POST /api/chat/grooming/assign
+- Legacy frontend compatibility paths tied to old confirmation and assignment routes.
+
 ## [1.0.2] - 2026-06-26
 
 ### Added
