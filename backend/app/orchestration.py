@@ -670,17 +670,19 @@ def _emit_progress(
     name: str,
     status: str,
     details: str | None = None,
+    artifacts: list[dict[str, str]] | None = None,
 ) -> None:
     if not cb:
         return
-    cb(
-        {
-            "name": name,
-            "status": status,
-            "details": details,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    payload = {
+        "name": name,
+        "status": status,
+        "details": details,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if artifacts is not None:
+        payload["artifacts"] = artifacts
+    cb(payload)
 
 
 def _prepare_env() -> dict[str, str]:
@@ -743,8 +745,14 @@ def _select_copilot_agent(issue: dict, change_plan: list[str]) -> tuple[str, str
     corpus = "\n".join(
         [
             str(issue.get("summary", "")),
-            str(issue.get("description", "")),
-            str(issue.get("type", "")),
+        _emit_progress(progress_callback, "view_artifacts", "running", f"{len(artifacts)} artifact(s)")
+        _emit_progress(
+            progress_callback,
+            "view_artifacts",
+            "success",
+            f"{len(artifacts)} artifact(s)",
+            artifacts=artifacts,
+        )
             str(issue.get("status", "")),
             str(issue.get("priority", "")),
             "\n".join(str(label) for label in labels),

@@ -571,6 +571,8 @@ def _run_job(job_id: str, payload: OrchestrateRequest, retry_context: dict | Non
             "status": _normalize_step_state(str(event.get("status") or "running")),
             "details": event.get("details"),
         }
+        if isinstance(event.get("artifacts"), list):
+            normalized_event["artifacts"] = event.get("artifacts")
 
         if control is not None:
             control.wait_until_runnable(cancel_token)

@@ -11,6 +11,23 @@ const parseApiPayload = (raw) => {
   }
 }
 
+const resolveJobArtifacts = (details) => {
+  const resultArtifacts = details?.result?.artifacts
+  if (Array.isArray(resultArtifacts) && resultArtifacts.length > 0) {
+    return resultArtifacts
+  }
+
+  const progress = Array.isArray(details?.progress) ? details.progress : []
+  for (let idx = progress.length - 1; idx >= 0; idx -= 1) {
+    const event = progress[idx]
+    if (event?.name !== 'view_artifacts') continue
+    if (!Array.isArray(event?.artifacts)) continue
+    if (event.artifacts.length === 0) continue
+    return event.artifacts
+  }
+  return []
+}
+
 export default function ExecutingJobs({
   runningJobs = [],
   onJobComplete,
@@ -162,6 +179,7 @@ export default function ExecutingJobs({
       {runningJobs.map((job) => {
         const details = jobDetails[job.id] || { status: 'queued', progress: [] }
         const progress = details.progress || []
+        const artifacts = resolveJobArtifacts(details)
         const allowedActions = Array.isArray(details.allowed_actions) ? details.allowed_actions : []
         const pendingAction = actionState[job.id]
 
@@ -353,11 +371,11 @@ export default function ExecutingJobs({
               onFailedStepClick={(stepKey) => setHighlightedSteps((prev) => ({ ...prev, [job.id]: stepKey }))}
             />
 
-            {details.result?.artifacts?.length > 0 && (
+            {artifacts.length > 0 && (
               <details className="history-collapsible" style={{ marginTop: '0.75rem' }}>
                 <summary>Artifacts</summary>
                 <div className="history-artifacts">
-                  {details.result.artifacts.map((artifact) => (
+                  {artifacts.map((artifact) => (
                     <div className="artifact-actions" key={artifact.path}>
                       <button
                         type="button"

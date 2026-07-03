@@ -1179,68 +1179,86 @@ export default function App() {
           ) : (
             <div className="history-list">
               {filteredHistory.map((entry) => (
-                <div key={entry.id} className={`history-entry history-${entry.status}`}>
-                  <div className="history-top-row">
-                    {(() => {
-                      const flow = computeFlowProgress(entry)
-                      return (
-                        <div className="history-flow-metric">
-                          <span className="history-flow-label">Flow Progress</span>
-                          <strong>{flow.done}/{flow.total}</strong>
-                        </div>
-                      )
-                    })()}
-                    <div className="history-trigger-time">
-                      Triggered: {new Date(entry.created_at).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="history-header">
-                    <div className="history-header-main">
-                      <strong>
-                        {buildJiraLink(entry) ? (
-                          <a href={buildJiraLink(entry)} target="_blank" rel="noreferrer" className="ticket-link">
-                            {entry.request?.jira_ticket_id || '-'}
+                <details
+                  key={entry.id}
+                  className={`history-entry history-${entry.status}`}
+                  open={entry.status === 'running' || entry.status === 'queued'}
+                >
+                  <summary className="history-entry-summary">
+                    <div className="history-header">
+                      <div className="history-header-main">
+                        <strong>
+                          {buildJiraLink(entry) ? (
+                            <a href={buildJiraLink(entry)} target="_blank" rel="noreferrer" className="ticket-link" onClick={(event) => event.stopPropagation()}>
+                              {entry.request?.jira_ticket_id || '-'}
+                            </a>
+                          ) : (
+                            entry.request?.jira_ticket_id || '-'
+                          )}
+                        </strong>{' '}
+                        on <code>{entry.request?.repository || '-'}</code>
+                        {entry.result?.pull_request_url && (
+                          <a
+                            href={entry.result.pull_request_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="history-pr-link"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            View PR
                           </a>
-                        ) : (
-                          entry.request?.jira_ticket_id || '-'
                         )}
-                      </strong>{' '}
-                      on <code>{entry.request?.repository || '-'}</code>
-                      {entry.result?.pull_request_url && (
-                        <a href={entry.result.pull_request_url} target="_blank" rel="noreferrer" className="history-pr-link">
-                          View PR
-                        </a>
-                      )}
-                      <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.78rem', color: '#4e6c80' }}>
-                        Agent: <strong>{entry.request?.selected_agent || 'SWE'}</strong>
-                        {' · '}Model: <strong>{entry.request?.selected_model || 'Auto'}</strong>
-                      </span>
-                      {entry.retry_lineage && (
-                        <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.74rem', color: '#5b6b79' }}>
-                          Retry Attempt #{entry.retry_lineage.attempt_no || '-'}
-                          {' · '}Parent: {entry.retry_lineage.parent_job_id || '-'}
-                          {' · '}Mode: {entry.retry_lineage.retry_mode || '-'}
+                        <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.78rem', color: '#4e6c80' }}>
+                          Agent: <strong>{entry.request?.selected_agent || 'SWE'}</strong>
+                          {' · '}Model: <strong>{entry.request?.selected_model || 'Auto'}</strong>
                         </span>
-                      )}
+                        {entry.retry_lineage && (
+                          <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.74rem', color: '#5b6b79' }}>
+                            Retry Attempt #{entry.retry_lineage.attempt_no || '-'}
+                            {' · '}Parent: {entry.retry_lineage.parent_job_id || '-'}
+                            {' · '}Mode: {entry.retry_lineage.retry_mode || '-'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="history-header-right">
+                        <span className="history-duration-pill">
+                          Duration: {formatDurationCompact(entry.result?.usage?.ai?.duration_seconds)}
+                        </span>
+                        <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
+                        {canManage && (
+                          <button
+                            type="button"
+                            className="history-delete-btn"
+                            onClick={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              handleDeleteHistoryEntry(entry.id)
+                            }}
+                            title="Delete record"
+                            aria-label="Delete orchestration record"
+                          >
+                            x
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div className="history-header-right">
-                      <span className="history-duration-pill">
-                        Duration: {formatDurationCompact(entry.result?.usage?.ai?.duration_seconds)}
-                      </span>
-                      <span className={`status-badge status-${entry.status}`}>{entry.status}</span>
-                      {canManage && (
-                        <button
-                          type="button"
-                          className="history-delete-btn"
-                          onClick={() => handleDeleteHistoryEntry(entry.id)}
-                          title="Delete record"
-                          aria-label="Delete orchestration record"
-                        >
-                          x
-                        </button>
-                      )}
+                  </summary>
+
+                  <div className="history-entry-body">
+                    <div className="history-top-row">
+                      {(() => {
+                        const flow = computeFlowProgress(entry)
+                        return (
+                          <div className="history-flow-metric">
+                            <span className="history-flow-label">Flow Progress</span>
+                            <strong>{flow.done}/{flow.total}</strong>
+                          </div>
+                        )
+                      })()}
+                      <div className="history-trigger-time">
+                        Triggered: {new Date(entry.created_at).toLocaleString()}
+                      </div>
                     </div>
-                  </div>
                   {entry.status === 'failed' && entry.error && (
                     <div className="history-error" style={{ fontStyle: 'italic', fontSize: '0.78rem' }}>
                       ⚠ Failed — click the highlighted step in the flow diagram for details
@@ -1375,7 +1393,8 @@ export default function App() {
                       <RawLogsTable rows={buildLogRows(entry)} highlightKey={highlightedSteps[entry.id] || null} />
                     </details>
                   )}
-                </div>
+                  </div>
+                </details>
               ))}
             </div>
           )}

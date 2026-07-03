@@ -924,9 +924,10 @@ button:hover {
 .history-entry {
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 1rem;
+  padding: 0;
   background: #131c2e;
   box-shadow: 0 2px 12px #00000040;
+  overflow: hidden;
 }
 
 .history-entry.history-success {
@@ -935,6 +936,20 @@ button:hover {
 
 .history-entry.history-failed {
   border-left: 4px solid #ef4444;
+}
+
+.history-entry-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 1rem;
+}
+
+.history-entry-summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-entry-body {
+  padding: 0 1rem 1rem;
 }
 
 .history-header {
