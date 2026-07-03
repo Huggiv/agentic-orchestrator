@@ -91,6 +91,8 @@ _STEP_ORDER = [
     "publish_review_comments",
 ]
 
+_OPTIONAL_EXECUTION_STEPS = {"commit_changes", "push_branch", "create_pr"}
+
 
 def _normalize_step_name(name: str | None) -> str:
     value = str(name or "").strip()
@@ -1086,6 +1088,7 @@ def run_orchestration(
     run_id: str | None = None,
     retry_context: dict | None = None,
     jira_context: dict[str, Any] | None = None,
+    execution_steps: list[str] | None = None,
 ) -> dict:
     if cancellation_token:
         cancellation_token.throw_if_cancelled()
@@ -1106,12 +1109,35 @@ def run_orchestration(
     if not isinstance(side_effect_guards, dict):
         side_effect_guards = {}
 
+    enabled_optional_steps = set(_OPTIONAL_EXECUTION_STEPS)
+    if retry_mode not in {"failed_step_only", "from_failed_step"} and isinstance(execution_steps, list):
+        normalized_requested = {
+            _normalize_step_name(step)
+            for step in execution_steps
+            if isinstance(step, str) and step.strip()
+        }
+        enabled_optional_steps = {
+            step_name
+            for step_name in normalized_requested
+            if step_name in _OPTIONAL_EXECUTION_STEPS
+        }
+
+        # Enforce dependency chain: create_pr -> push_branch -> commit_changes.
+        if "create_pr" in enabled_optional_steps:
+            enabled_optional_steps.add("push_branch")
+            enabled_optional_steps.add("commit_changes")
+        if "push_branch" in enabled_optional_steps:
+            enabled_optional_steps.add("commit_changes")
+
     def should_run_step(step_name: str) -> bool:
+        normalized = _normalize_step_name(step_name)
+        if retry_mode not in {"failed_step_only", "from_failed_step"} and normalized in _OPTIONAL_EXECUTION_STEPS:
+            return normalized in enabled_optional_steps
+
         if retry_mode not in {"failed_step_only", "from_failed_step"}:
             return True
         if retry_start_step not in _STEP_ORDER:
             return True
-        normalized = _normalize_step_name(step_name)
         if normalized in _required_retry_prerequisites(retry_start_step):
             return True
         if retry_mode == "failed_step_only":
@@ -1372,6 +1398,17 @@ def run_orchestration(
             }
         ]
 
+        if should_run_step("view_artifacts"):
+            _emit_progress(progress_callback, "view_artifacts", "running", f"{len(note_artifacts)} artifact(s)")
+            _emit_progress(
+                progress_callback,
+                "view_artifacts",
+                "success",
+                f"{len(note_artifacts)} artifact(s)",
+                artifacts=note_artifacts,
+            )
+            steps.append(StepResult(name="view_artifacts", status="success", details=f"{len(note_artifacts)} artifact(s)"))
+
         _emit_progress(progress_callback, "agentic_implementation", "success")
         steps.append(StepResult(name="agentic_implementation", status="success"))
     else:
@@ -1419,7 +1456,8 @@ def run_orchestration(
         mark_skipped("commit_changes", "Skipped by retry policy")
 
     commits_ahead = _count_commits_ahead(repo_path, env, base_branch, cancellation_token=cancellation_token)
-    if commits_ahead <= 0:
+    needs_commits_for_downstream = should_run_step("push_branch") or should_run_step("create_pr")
+    if needs_commits_for_downstream and commits_ahead <= 0:
         raise OrchestrationError(
             f"No commits were created on {branch_name}; create at least one commit before opening a pull request against {base_branch}."
         )

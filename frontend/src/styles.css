@@ -630,6 +630,43 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 
+.flow-step-selector-field {
+  align-self: stretch;
+}
+
+.flow-step-selector {
+  margin-top: 0.2rem;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #0f172a;
+}
+
+.flow-step-selector summary {
+  cursor: pointer;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.78rem;
+  color: #cbd5e1;
+  font-weight: 700;
+}
+
+.flow-step-selector-list {
+  padding: 0.15rem 0.65rem 0.55rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.flow-step-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+}
+
+.flow-step-checkbox input {
+  width: auto;
+}
+
 .model-select-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1170,6 +1207,12 @@ button:hover {
 
 .history-result {
   margin-top: 0.5rem;
+}
+
+.history-empty-detail {
+  margin: 0.45rem 0 0;
+  color: #9eb6d0;
+  font-size: 0.78rem;
 }
 
 .history-result a {

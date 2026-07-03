@@ -182,6 +182,7 @@ class OrchestrateRequest(BaseModel):
     selected_model: Optional[str] = None
     commit_message: str = Field(min_length=3)
     change_plan: list[str] = Field(default_factory=list)
+    execution_steps: list[str] | None = None
     jira_context: dict[str, Any] | None = None
 
 
@@ -642,6 +643,7 @@ def _run_job(job_id: str, payload: OrchestrateRequest, retry_context: dict | Non
             "selected_model": payload.selected_model,
             "commit_message": payload.commit_message,
             "change_plan": payload.change_plan,
+            "execution_steps": payload.execution_steps,
             "jira_context": payload.jira_context,
             "progress_callback": progress_callback,
             "cancellation_token": cancel_token,
@@ -709,6 +711,7 @@ def enqueue_orchestration(
         "selected_model": payload.selected_model,
         "commit_message": payload.commit_message,
         "change_plan": payload.change_plan,
+        "execution_steps": payload.execution_steps,
         "jira_context": payload.jira_context,
         "jira_url": os.environ.get("JIRA_URL"),
         "workspace_dir": _workspace_dir_for_job(job_id),

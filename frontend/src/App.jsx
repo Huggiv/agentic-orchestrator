@@ -15,6 +15,12 @@ const defaultPlan = [
   'Run tests and lint checks',
 ]
 
+const OPTIONAL_EXECUTION_STEPS = [
+  { key: 'commit_changes', label: 'Commit Changes' },
+  { key: 'push_branch', label: 'Push Branch' },
+  { key: 'create_pr', label: 'Create PR' },
+]
+
 const JOB_STATUS_LABELS = {
   idle: 'Ready',
   queued: 'Queued',
@@ -160,6 +166,7 @@ export default function App() {
   const [runningJobs, setRunningJobs] = useState([])
   const [activeTab, setActiveTab] = useState('run')
   const [expandedPanels, setExpandedPanels] = useState({ trigger: true, 'jira-search': false, 'pr-review': false })
+  const [selectedExecutionSteps, setSelectedExecutionSteps] = useState(['commit_changes', 'push_branch', 'create_pr'])
   const [selectedArtifact, setSelectedArtifact] = useState(null)
   const [historySearchFilter, setHistorySearchFilter] = useState('')
   const lastModelAutoRefreshRef = useRef(0)
@@ -505,6 +512,7 @@ export default function App() {
   }
 
   const runTicketWorkflow = async (jiraTicketId, config = {}) => {
+    const executionSteps = Array.isArray(config.executionSteps) ? config.executionSteps : selectedExecutionSteps
     const response = await fetch('/api/orchestrate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -517,6 +525,7 @@ export default function App() {
         reviewer: config.reviewer || reviewer || null,
         commit_message: `feat(${jiraTicketId.toLowerCase()}): automated implementation`,
         change_plan: defaultPlan,
+        execution_steps: executionSteps,
       }),
     })
 
@@ -682,6 +691,7 @@ export default function App() {
           reviewer: reviewer || null,
           commit_message: `feat(${ticket.toLowerCase()}): automated implementation`,
           change_plan: defaultPlan,
+          execution_steps: selectedExecutionSteps,
         }),
       })
 
@@ -717,6 +727,61 @@ export default function App() {
   }
 
   const isRunning = jobStatus === 'queued' || jobStatus === 'running'
+
+  const toggleExecutionStep = (stepKey) => {
+    setSelectedExecutionSteps((prev) => {
+      const next = new Set(prev)
+      const isEnabled = next.has(stepKey)
+
+      if (stepKey === 'commit_changes') {
+        if (isEnabled) {
+          next.delete('commit_changes')
+          next.delete('push_branch')
+          next.delete('create_pr')
+        } else {
+          next.add('commit_changes')
+        }
+      }
+
+      if (stepKey === 'push_branch') {
+        if (isEnabled) {
+          next.delete('push_branch')
+          next.delete('create_pr')
+        } else {
+          next.add('push_branch')
+          next.add('commit_changes')
+        }
+      }
+
+      if (stepKey === 'create_pr') {
+        if (isEnabled) {
+          next.delete('create_pr')
+        } else {
+          next.add('create_pr')
+          next.add('push_branch')
+          next.add('commit_changes')
+        }
+      }
+
+      return Array.from(next)
+    })
+  }
+
+  const resolveHistoryArtifacts = (entry) => {
+    const resultArtifacts = entry?.result?.artifacts
+    if (Array.isArray(resultArtifacts) && resultArtifacts.length > 0) {
+      return resultArtifacts
+    }
+
+    const progress = Array.isArray(entry?.progress) ? entry.progress : []
+    for (let idx = progress.length - 1; idx >= 0; idx -= 1) {
+      const event = progress[idx]
+      if (event?.name !== 'view_artifacts') continue
+      if (!Array.isArray(event?.artifacts) || event.artifacts.length === 0) continue
+      return event.artifacts
+    }
+    return []
+  }
 
   const buildJiraLink = (entry) => {
     const ticketId = entry.request?.jira_ticket_id
@@ -924,6 +989,27 @@ export default function App() {
                 <label>
                   Repository (owner/repo or URL)
                   <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
+                </label>
+
+                <label className="flow-step-selector-field">
+                  Job Flow Steps
+                  <details className="flow-step-selector">
+                    <summary>
+                      {selectedExecutionSteps.length}/{OPTIONAL_EXECUTION_STEPS.length} optional steps selected
+                    </summary>
+                    <div className="flow-step-selector-list">
+                      {OPTIONAL_EXECUTION_STEPS.map((step) => (
+                        <label key={step.key} className="flow-step-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={selectedExecutionSteps.includes(step.key)}
+                            onChange={() => toggleExecutionStep(step.key)}
+                          />
+                          <span>{step.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
                 </label>
 
                 <button type="submit" disabled={isRunning || !canRun}>
@@ -1306,79 +1392,96 @@ export default function App() {
                       </button>
                     </div>
                   )}
-                  {entry.result && (
-                    <div className="history-result">
-                      {entry.result.usage && (
-                        <details className="history-collapsible" open={entry.status === 'running' || entry.status === 'queued'}>
-                          <summary>Changes and Usage</summary>
-                          <div className="history-credits">
-                            <table className="history-credits-table">
-                              <tbody>
-                                <tr className="history-credits-highlight">
-                                  <th scope="row">Changes</th>
-                                  <td>+{formatInt(entry.result.usage?.changes?.added)} / -{formatInt(entry.result.usage?.changes?.removed)}</td>
-                                </tr>
-                                <tr className="history-credits-highlight">
-                                  <th scope="row">Cost</th>
-                                  <td>${formatCost(entry.result.usage.estimated_cost_usd)}</td>
-                                </tr>
-                                <tr>
-                                  <th scope="row">AI Credits</th>
-                                  <td>{formatCredits(normalizeCredits(entry.result.usage))}</td>
-                                </tr>
-                                <tr>
-                                  <th scope="row">Tokens</th>
-                                  <td>
-                                    Total {formatTokenCompact(entry.result.usage?.tokens?.total)}
-                                    {' '}({formatTokenCompact(entry.result.usage?.tokens?.input)} In, {formatTokenCompact(entry.result.usage?.tokens?.output)} Out, {formatTokenCompact(entry.result.usage?.tokens?.cached)} cached)
-                                  </td>
-                                </tr>
-                                <tr>
-                                  <th scope="row">Duration</th>
-                                  <td>{formatDurationHms(entry.result.usage?.ai?.duration_seconds)}</td>
-                                </tr>
-                                {entry.result.usage?.session_ids?.length > 0 && (
-                                  <tr>
-                                    <th scope="row">Session</th>
-                                    <td>{entry.result.usage.session_ids.join(', ')}</td>
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </details>
-                      )}
+                  <div className="history-result">
+                    {(() => {
+                      const usage = entry.result?.usage || null
+                      const artifacts = resolveHistoryArtifacts(entry)
+                      const showUsageSection = Boolean(usage) || entry.status === 'failed'
+                      const showArtifactsSection = artifacts.length > 0 || entry.status === 'failed'
 
-                      {entry.result.artifacts?.length > 0 && (
-                        <details className="history-collapsible">
-                          <summary>Artifacts</summary>
-                          <div className="history-artifacts">
-                            {entry.result.artifacts.map((artifact) => (
-                              <div className="artifact-actions" key={artifact.path}>
-                                <button
-                                  type="button"
-                                  className="artifact-link"
-                                  onClick={() => openArtifact(artifact)}
-                                >
-                                  {artifact.path}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="artifact-download-btn"
-                                  onClick={() => downloadArtifact(artifact)}
-                                  disabled={!String(artifact.content || '').trim()}
-                                  title={!String(artifact.content || '').trim() ? 'Artifact has no content to download' : 'Download artifact'}
-                                  aria-label={`Download ${artifact.path}`}
-                                >
-                                  Download
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      )}
-                    </div>
-                  )}
+                      return (
+                        <>
+                          {showUsageSection && (
+                            <details className="history-collapsible" open={entry.status === 'running' || entry.status === 'queued'}>
+                              <summary>Changes and Usage</summary>
+                              {usage ? (
+                                <div className="history-credits">
+                                  <table className="history-credits-table">
+                                    <tbody>
+                                      <tr className="history-credits-highlight">
+                                        <th scope="row">Changes</th>
+                                        <td>+{formatInt(usage?.changes?.added)} / -{formatInt(usage?.changes?.removed)}</td>
+                                      </tr>
+                                      <tr className="history-credits-highlight">
+                                        <th scope="row">Cost</th>
+                                        <td>${formatCost(usage.estimated_cost_usd)}</td>
+                                      </tr>
+                                      <tr>
+                                        <th scope="row">AI Credits</th>
+                                        <td>{formatCredits(normalizeCredits(usage))}</td>
+                                      </tr>
+                                      <tr>
+                                        <th scope="row">Tokens</th>
+                                        <td>
+                                          Total {formatTokenCompact(usage?.tokens?.total)}
+                                          {' '}({formatTokenCompact(usage?.tokens?.input)} In, {formatTokenCompact(usage?.tokens?.output)} Out, {formatTokenCompact(usage?.tokens?.cached)} cached)
+                                        </td>
+                                      </tr>
+                                      <tr>
+                                        <th scope="row">Duration</th>
+                                        <td>{formatDurationHms(usage?.ai?.duration_seconds)}</td>
+                                      </tr>
+                                      {usage?.session_ids?.length > 0 && (
+                                        <tr>
+                                          <th scope="row">Session</th>
+                                          <td>{usage.session_ids.join(', ')}</td>
+                                        </tr>
+                                      )}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ) : (
+                                <p className="history-empty-detail">Usage details are unavailable for this failed run.</p>
+                              )}
+                            </details>
+                          )}
+
+                          {showArtifactsSection && (
+                            <details className="history-collapsible">
+                              <summary>Artifacts</summary>
+                              {artifacts.length > 0 ? (
+                                <div className="history-artifacts">
+                                  {artifacts.map((artifact) => (
+                                    <div className="artifact-actions" key={artifact.path}>
+                                      <button
+                                        type="button"
+                                        className="artifact-link"
+                                        onClick={() => openArtifact(artifact)}
+                                      >
+                                        {artifact.path}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="artifact-download-btn"
+                                        onClick={() => downloadArtifact(artifact)}
+                                        disabled={!String(artifact.content || '').trim()}
+                                        title={!String(artifact.content || '').trim() ? 'Artifact has no content to download' : 'Download artifact'}
+                                        aria-label={`Download ${artifact.path}`}
+                                      >
+                                        Download
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="history-empty-detail">No artifacts were captured for this run.</p>
+                              )}
+                            </details>
+                          )}
+                        </>
+                      )
+                    })()}
+                  </div>
 
                   <details className="history-collapsible history-logs" open={entry.status === 'running' || entry.status === 'queued'}>
                     <summary>Flow Diagram Steps</summary>
