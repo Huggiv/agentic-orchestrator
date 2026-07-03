@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -219,6 +220,7 @@ def _run(
     cwd: str,
     env: dict[str, str],
     cancellation_token: CancellationToken | None = None,
+    on_output: Callable[[str, str], None] | None = None,
 ) -> str:
     if cancellation_token:
         cancellation_token.throw_if_cancelled()
@@ -230,31 +232,59 @@ def _run(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
         start_new_session=True,
     )
     if cancellation_token:
         cancellation_token.set_active_pgid(proc.pid)
 
-    stdout_text = ""
-    stderr_text = ""
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
     cancelled = False
+
+    def _consume_stream(pipe: Any, stream_name: str, collector: list[str]) -> None:
+        if pipe is None:
+            return
+        for line in iter(pipe.readline, ""):
+            collector.append(line)
+            stripped = line.rstrip("\r\n")
+            if on_output and stripped:
+                on_output(stream_name, stripped)
+        pipe.close()
+
+    stdout_thread = threading.Thread(
+        target=_consume_stream,
+        args=(proc.stdout, "stdout", stdout_chunks),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_consume_stream,
+        args=(proc.stderr, "stderr", stderr_chunks),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
     try:
         while True:
             if cancellation_token and cancellation_token.is_cancelled:
                 cancelled = True
                 _terminate_process_group(proc.pid)
                 break
-            try:
-                stdout_text, stderr_text = proc.communicate(timeout=0.2)
+            if proc.poll() is not None:
                 break
-            except subprocess.TimeoutExpired:
-                continue
+            time.sleep(0.1)
     finally:
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
         if cancellation_token:
             cancellation_token.clear_active_pgid()
 
     if cancelled:
         raise OrchestrationCancelled("Cancelled by user request")
+
+    stdout_text = "".join(stdout_chunks)
+    stderr_text = "".join(stderr_chunks)
 
     if proc.returncode != 0:
         stderr = (stderr_text or "").strip()
@@ -632,6 +662,14 @@ def _run_pr_review_orchestration(
         agent_name="PR-Review",
         model=selected_model,
         cancellation_token=cancellation_token,
+        stream_callback=(
+            lambda line: _emit_progress(
+                progress_callback,
+                "copilot_stream",
+                "running",
+                f"[agentic_pr_review] {line}",
+            )
+        ),
     )
     session_id = _extract_copilot_session_id(review_output)
     if session_id:
@@ -796,6 +834,7 @@ def _run_copilot_prompt(
     agent_name: str,
     model: str | None = None,
     cancellation_token: CancellationToken | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Run Copilot CLI in non-interactive mode with full tool permissions."""
     cmd = [
@@ -811,8 +850,23 @@ def _run_copilot_prompt(
     if model:
         cmd.extend(["--model", model])
     cmd.extend(["-p", prompt])
+
+    def _forward_stream(stream_name: str, line: str) -> None:
+        if not stream_callback:
+            return
+        if stream_name == "stderr":
+            stream_callback(f"[stderr] {line}")
+            return
+        stream_callback(line)
+
     try:
-        return _run(cmd, cwd=cwd, env=env, cancellation_token=cancellation_token)
+        return _run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            cancellation_token=cancellation_token,
+            on_output=_forward_stream,
+        )
     except OrchestrationError as exc:
         detail = str(exc)
         auth_markers = (
@@ -1365,6 +1419,14 @@ def run_orchestration(
             agent_name=selected_agent,
             model=selected_model,
             cancellation_token=cancellation_token,
+            stream_callback=(
+                lambda line: _emit_progress(
+                    progress_callback,
+                    "copilot_stream",
+                    "running",
+                    f"[agentic_implementation] {line}",
+                )
+            ),
         )
         session_id = _extract_copilot_session_id(output)
         if session_id:

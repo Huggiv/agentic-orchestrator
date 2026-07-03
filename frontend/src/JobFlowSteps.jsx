@@ -119,51 +119,67 @@ const collectHistoryStepStatus = (entry, flowSteps) => collectHistoryStepData(en
  * Returns an array of { name, status, details, error? }.
  */
 export function buildLogRows(entry) {
-  const normalized = {}  // stepName → { name, status, details }
-  const order = []
+  const rows = []
 
   ;(entry.progress || []).forEach((item) => {
-    const key = STEP_ALIASES[item.name] || item.name
-    if (!normalized[key]) order.push(key)
-    normalized[key] = { name: item.name, status: item.status || 'idle', details: item.details || normalized[key]?.details || null }
+    rows.push({
+      name: item.name,
+      status: item.status || 'idle',
+      details: item.details || null,
+    })
+  })
+
+  ;(entry.result?.steps || []).forEach((item) => {
+    rows.push({
+      name: item.name,
+      status: item.status || 'idle',
+      details: item.details || null,
+    })
   })
 
   // When the overall job failed, find the last step still in running/queued state
   // (no success event was emitted) and mark it failed.
   if (entry.status === 'failed') {
     let failedKey = null
-    for (const key of order) {
-      if (normalized[key].status === 'running' || normalized[key].status === 'queued') {
-        failedKey = key
+    for (const row of rows) {
+      if (row.status === 'running' || row.status === 'queued') {
+        failedKey = row.name
       }
     }
     if (!failedKey) {
-      // All steps show success but job still failed — blame last step in order
-      failedKey = order[order.length - 1] || null
+      failedKey = rows[rows.length - 1]?.name || null
     }
-    if (failedKey && normalized[failedKey].status !== 'success' && normalized[failedKey].status !== 'skipped') {
-      normalized[failedKey].status = 'failed'
-      normalized[failedKey].error = entry.error || null
+    if (failedKey) {
+      rows.push({
+        name: failedKey,
+        status: 'failed',
+        details: 'Step ended in failure',
+        error: entry.error || null,
+      })
     }
   }
 
   if (entry.status === 'cancelled') {
     let cancelledKey = null
-    for (const key of order) {
-      if (normalized[key].status === 'running' || normalized[key].status === 'queued') {
-        cancelledKey = key
+    for (const row of rows) {
+      if (row.status === 'running' || row.status === 'queued') {
+        cancelledKey = row.name
       }
     }
     if (!cancelledKey) {
-      cancelledKey = order[order.length - 1] || null
+      cancelledKey = rows[rows.length - 1]?.name || null
     }
-    if (cancelledKey && normalized[cancelledKey].status !== 'success' && normalized[cancelledKey].status !== 'skipped') {
-      normalized[cancelledKey].status = 'cancelled'
-      normalized[cancelledKey].error = entry.error || null
+    if (cancelledKey) {
+      rows.push({
+        name: cancelledKey,
+        status: 'cancelled',
+        details: 'Execution cancelled',
+        error: entry.error || null,
+      })
     }
   }
 
-  return order.map((key) => normalized[key])
+  return rows
 }
 
 export const computeFlowProgress = (entry) => {
