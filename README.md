@@ -273,6 +273,7 @@ Legacy endpoint timeline:
 Generated architecture and project documentation:
 
 - `changelog.md`
+- `docs/releases/v1.1.0.md`
 - `docs/releases/v1.0.2.md`
 - `docs/releases/v1.0.0.md`
 - `docs/project-summary.md`
