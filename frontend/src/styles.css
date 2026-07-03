@@ -938,6 +938,14 @@ button:hover {
   border-left: 4px solid #ef4444;
 }
 
+.history-entry.history-workflow-implementation {
+  box-shadow: 0 2px 12px #00000040, inset 0 0 0 1px #22d3ee22;
+}
+
+.history-entry.history-workflow-pr-review {
+  box-shadow: 0 2px 12px #00000040, inset 0 0 0 1px #f973162f;
+}
+
 .history-entry-summary {
   list-style: none;
   cursor: pointer;
@@ -1001,6 +1009,30 @@ button:hover {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+}
+
+.workflow-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.58rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border: 1px solid transparent;
+}
+
+.workflow-badge--implementation {
+  border-color: #22d3ee55;
+  background: #164e6335;
+  color: #67e8f9;
+}
+
+.workflow-badge--pr-review {
+  border-color: #fb923c66;
+  background: #7c2d1238;
+  color: #fdba74;
 }
 
 .history-top-row {
@@ -1816,9 +1848,11 @@ button:hover {
 .chat-panel--tab {
   width: 100%;
   min-height: calc(100vh - 180px);
+  height: calc(100vh - 180px);
   padding: 0.85rem;
   border-radius: 16px;
   animation: rise 0.24s ease-out;
+  overflow: hidden;
   background:
     radial-gradient(circle at 10% 5%, #0d2d4e90 0%, transparent 44%),
     radial-gradient(circle at 90% 100%, #5b2d0e70 0%, transparent 48%),
@@ -1889,7 +1923,7 @@ button:hover {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.75rem;
   min-height: 0;
-  height: calc(100vh - 320px);
+  height: 100%;
 }
 
 .chat-sessions {
@@ -2152,6 +2186,7 @@ button:hover {
   grid-template-rows: minmax(0, 1fr) auto auto;
   min-height: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 .chat-thread {
@@ -2159,7 +2194,7 @@ button:hover {
   border-radius: 12px;
   background: linear-gradient(180deg, #111a2c 0%, #0f172a 100%);
   padding: 0.85rem;
-  min-height: 320px;
+  min-height: 0;
   overflow-y: auto;
   display: grid;
   gap: 0.7rem;
@@ -2557,11 +2592,12 @@ button:hover {
 
   .chat-panel--tab {
     min-height: calc(100vh - 220px);
+    height: calc(100vh - 220px);
   }
 
   .chat-layout {
     grid-template-columns: 1fr;
-    height: auto;
+    height: 100%;
   }
 
   .chat-sessions--right.is-collapsed,

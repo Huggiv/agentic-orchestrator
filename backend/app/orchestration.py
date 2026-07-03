@@ -631,7 +631,13 @@ def _run_pr_review_orchestration(
     artifacts = [*pr_review_artifacts, *generated_artifacts]
 
     _emit_progress(progress_callback, "view_artifacts", "running", f"{len(artifacts)} artifact(s)")
-    _emit_progress(progress_callback, "view_artifacts", "success", f"{len(artifacts)} artifact(s)")
+    _emit_progress(
+        progress_callback,
+        "view_artifacts",
+        "success",
+        f"{len(artifacts)} artifact(s)",
+        artifacts=artifacts,
+    )
     steps.append(StepResult(name="view_artifacts", status="success", details=f"{len(artifacts)} artifact(s)"))
 
     _emit_progress(progress_callback, "publish_review_comments", "running", f"{len(findings)} finding(s)")
@@ -745,14 +751,8 @@ def _select_copilot_agent(issue: dict, change_plan: list[str]) -> tuple[str, str
     corpus = "\n".join(
         [
             str(issue.get("summary", "")),
-        _emit_progress(progress_callback, "view_artifacts", "running", f"{len(artifacts)} artifact(s)")
-        _emit_progress(
-            progress_callback,
-            "view_artifacts",
-            "success",
-            f"{len(artifacts)} artifact(s)",
-            artifacts=artifacts,
-        )
+            str(issue.get("description", "")),
+            str(issue.get("type", "")),
             str(issue.get("status", "")),
             str(issue.get("priority", "")),
             "\n".join(str(label) for label in labels),

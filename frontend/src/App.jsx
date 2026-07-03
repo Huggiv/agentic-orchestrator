@@ -725,6 +725,15 @@ export default function App() {
     return `${jiraBaseUrl.replace(/\/$/, '')}/browse/${ticketId}`
   }
 
+  const getWorkflowType = (entry) => {
+    const selectedAgent = entry?.request?.selected_agent
+    return selectedAgent === 'PR-Review' ? 'PR Review' : 'Implementation'
+  }
+
+  const getWorkflowTypeKey = (entry) => {
+    return entry?.request?.selected_agent === 'PR-Review' ? 'pr-review' : 'implementation'
+  }
+
   const filteredHistory = history.filter((entry) => {
     const ticketId = (entry.request?.jira_ticket_id || '').toLowerCase()
     const repo = (entry.request?.repository || '').toLowerCase()
@@ -1181,7 +1190,7 @@ export default function App() {
               {filteredHistory.map((entry) => (
                 <details
                   key={entry.id}
-                  className={`history-entry history-${entry.status}`}
+                  className={`history-entry history-${entry.status} history-workflow-${getWorkflowTypeKey(entry)}`}
                   open={entry.status === 'running' || entry.status === 'queued'}
                 >
                   <summary className="history-entry-summary">
@@ -1209,6 +1218,8 @@ export default function App() {
                           </a>
                         )}
                         <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.78rem', color: '#4e6c80' }}>
+                          Workflow: <strong>{getWorkflowType(entry)}</strong>
+                          {' · '}
                           Agent: <strong>{entry.request?.selected_agent || 'SWE'}</strong>
                           {' · '}Model: <strong>{entry.request?.selected_model || 'Auto'}</strong>
                         </span>
@@ -1221,6 +1232,9 @@ export default function App() {
                         )}
                       </div>
                       <div className="history-header-right">
+                        <span className={`workflow-badge workflow-badge--${getWorkflowTypeKey(entry)}`}>
+                          {getWorkflowType(entry)}
+                        </span>
                         <span className="history-duration-pill">
                           Duration: {formatDurationCompact(entry.result?.usage?.ai?.duration_seconds)}
                         </span>
