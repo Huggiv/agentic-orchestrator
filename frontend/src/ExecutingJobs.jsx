@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import JobFlowSteps, { buildLogRows, RawLogsTable } from './JobFlowSteps'
+import { approveJob, pauseJob, rejectJob, resumeJob } from './services/orchestrate'
 
 const parseApiPayload = (raw) => {
   if (!raw) return {}
@@ -13,6 +14,7 @@ const parseApiPayload = (raw) => {
 export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
   const [jobDetails, setJobDetails] = useState({})
   const [cancelState, setCancelState] = useState({})
+  const [actionState, setActionState] = useState({})
   // highlightedSteps: { [jobId]: stepKey } — set when a failed step card is clicked
   const [highlightedSteps, setHighlightedSteps] = useState({})
 
@@ -35,6 +37,20 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
       }))
     } catch {
       setCancelState((prev) => ({ ...prev, [jobId]: 'error' }))
+    }
+  }
+
+  const executeAction = async (jobId, action) => {
+    setActionState((prev) => ({ ...prev, [jobId]: action }))
+    try {
+      if (action === 'pause') await pauseJob(jobId)
+      if (action === 'resume') await resumeJob(jobId)
+      if (action === 'approve') await approveJob(jobId)
+      if (action === 'reject') await rejectJob(jobId)
+    } catch {
+      // Poll loop will surface backend status/error.
+    } finally {
+      setActionState((prev) => ({ ...prev, [jobId]: '' }))
     }
   }
 
@@ -61,6 +77,10 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
                 [job.id]: {
                   status: statusData.status,
                   progress: statusData.progress || [],
+                  step_logs: statusData.step_logs || [],
+                  current_step: statusData.current_step || null,
+                  next_step: statusData.next_step || null,
+                  allowed_actions: statusData.allowed_actions || [],
                   error: statusData.error,
                   result: statusData.result,
                 },
@@ -77,6 +97,10 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               [job.id]: {
                 status: prev[job.id]?.status || 'running',
                 progress: prev[job.id]?.progress || [],
+                  step_logs: prev[job.id]?.step_logs || [],
+                  current_step: prev[job.id]?.current_step || null,
+                  next_step: prev[job.id]?.next_step || null,
+                  allowed_actions: prev[job.id]?.allowed_actions || [],
                 error: statusData.detail || 'Failed to fetch job status',
                 result: prev[job.id]?.result,
               },
@@ -88,6 +112,10 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               [job.id]: {
                 status: prev[job.id]?.status || 'running',
                 progress: prev[job.id]?.progress || [],
+                  step_logs: prev[job.id]?.step_logs || [],
+                  current_step: prev[job.id]?.current_step || null,
+                  next_step: prev[job.id]?.next_step || null,
+                  allowed_actions: prev[job.id]?.allowed_actions || [],
                 error: error?.message || 'Failed to fetch job status',
                 result: prev[job.id]?.result,
               },
@@ -129,6 +157,8 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
       {runningJobs.map((job) => {
         const details = jobDetails[job.id] || { status: 'queued', progress: [] }
         const progress = details.progress || []
+        const allowedActions = Array.isArray(details.allowed_actions) ? details.allowed_actions : []
+        const pendingAction = actionState[job.id]
 
         return (
           <div key={job.id} className="panel">
@@ -155,6 +185,10 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
                         ? '#f8d7da'
                         : details.status === 'cancelled'
                           ? '#fef3c7'
+                          : details.status === 'paused'
+                            ? '#e5e7eb'
+                            : details.status === 'blocked_approval'
+                              ? '#ffedd5'
                           : '#d8ebf8',
                   color:
                     details.status === 'success'
@@ -163,12 +197,100 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
                         ? '#721c24'
                         : details.status === 'cancelled'
                           ? '#92400e'
+                          : details.status === 'paused'
+                            ? '#374151'
+                            : details.status === 'blocked_approval'
+                              ? '#9a3412'
                           : '#0a4f74',
                 }}
               >
                 {details.status}
               </div>
-              {(details.status === 'queued' || details.status === 'running') && (
+              {allowedActions.includes('pause') && (
+                <button
+                  type="button"
+                  onClick={() => executeAction(job.id, 'pause')}
+                  disabled={pendingAction === 'pause'}
+                  style={{
+                    marginLeft: '0.6rem',
+                    padding: '0.24rem 0.62rem',
+                    borderRadius: '12px',
+                    border: '1px solid #4b5563',
+                    background: '#f3f4f6',
+                    color: '#374151',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    cursor: pendingAction === 'pause' ? 'default' : 'pointer',
+                    boxShadow: 'none',
+                  }}
+                >
+                  {pendingAction === 'pause' ? 'Pausing...' : 'Pause'}
+                </button>
+              )}
+              {allowedActions.includes('resume') && (
+                <button
+                  type="button"
+                  onClick={() => executeAction(job.id, 'resume')}
+                  disabled={pendingAction === 'resume'}
+                  style={{
+                    marginLeft: '0.6rem',
+                    padding: '0.24rem 0.62rem',
+                    borderRadius: '12px',
+                    border: '1px solid #16a34a',
+                    background: '#dcfce7',
+                    color: '#166534',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    cursor: pendingAction === 'resume' ? 'default' : 'pointer',
+                    boxShadow: 'none',
+                  }}
+                >
+                  {pendingAction === 'resume' ? 'Resuming...' : 'Resume'}
+                </button>
+              )}
+              {allowedActions.includes('approve') && (
+                <button
+                  type="button"
+                  onClick={() => executeAction(job.id, 'approve')}
+                  disabled={pendingAction === 'approve'}
+                  style={{
+                    marginLeft: '0.6rem',
+                    padding: '0.24rem 0.62rem',
+                    borderRadius: '12px',
+                    border: '1px solid #16a34a',
+                    background: '#dcfce7',
+                    color: '#166534',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    cursor: pendingAction === 'approve' ? 'default' : 'pointer',
+                    boxShadow: 'none',
+                  }}
+                >
+                  {pendingAction === 'approve' ? 'Approving...' : 'Approve'}
+                </button>
+              )}
+              {allowedActions.includes('reject') && (
+                <button
+                  type="button"
+                  onClick={() => executeAction(job.id, 'reject')}
+                  disabled={pendingAction === 'reject'}
+                  style={{
+                    marginLeft: '0.6rem',
+                    padding: '0.24rem 0.62rem',
+                    borderRadius: '12px',
+                    border: '1px solid #dc2626',
+                    background: '#fee2e2',
+                    color: '#991b1b',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    cursor: pendingAction === 'reject' ? 'default' : 'pointer',
+                    boxShadow: 'none',
+                  }}
+                >
+                  {pendingAction === 'reject' ? 'Rejecting...' : 'Reject'}
+                </button>
+              )}
+              {allowedActions.includes('cancel') && (
                 <button
                   type="button"
                   onClick={() => cancelJob(job.id)}
@@ -191,6 +313,19 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               )}
             </div>
 
+            {(details.current_step || details.next_step) && (
+              <p style={{ margin: '0.15rem 0 0.4rem 0', fontSize: '0.75rem', color: '#4e6c80' }}>
+                Current: <strong>{details.current_step || '-'}</strong>
+                {' · '}Next: <strong>{details.next_step || '-'}</strong>
+              </p>
+            )}
+
+            {details.status === 'blocked_approval' && (
+              <div style={{ padding: '0.25rem 0.6rem', background: '#451a0325', border: '1px solid #f59e0b50', borderRadius: '6px', marginBottom: '0.5rem', color: '#fdba74', fontSize: '0.78rem' }}>
+                Approval required to continue this checkpoint.
+              </div>
+            )}
+
             {details.error && (
               <div style={{ padding: '0.25rem 0.6rem', background: '#450a0a25', border: '1px solid #ef444440', borderRadius: '6px', marginBottom: '0.5rem', color: '#f87171', fontSize: '0.78rem', fontStyle: 'italic' }}>
                 ⚠ Failed — click the highlighted step below for details
@@ -203,6 +338,8 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
                 id: job.id,
                 status: details.status,
                 progress,
+                current_step: details.current_step,
+                next_step: details.next_step,
                 result: details.result,
                 error: details.error,
               }}

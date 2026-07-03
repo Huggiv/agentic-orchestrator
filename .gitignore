@@ -16,3 +16,4 @@ frontend/dist/
 .vscode/
 repos/*
 .agent_flow/*
+docs/plan/*

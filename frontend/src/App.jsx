@@ -18,8 +18,11 @@ const JOB_STATUS_LABELS = {
   idle: 'Ready',
   queued: 'Queued',
   running: 'Executing',
+  paused: 'Paused',
+  blocked_approval: 'Awaiting Approval',
   success: 'Completed',
   failed: 'Failed',
+  cancelled: 'Cancelled',
 }
 
 
@@ -168,7 +171,7 @@ export default function App() {
     setHistory(items)
     setRunningJobs(
       items
-        .filter((entry) => entry.status === 'queued' || entry.status === 'running')
+        .filter((entry) => ['queued', 'running', 'paused', 'blocked_approval'].includes(entry.status))
         .map((entry) => ({
           id: entry.id,
           jira_ticket_id: entry.request?.jira_ticket_id || '-',
@@ -251,7 +254,7 @@ export default function App() {
   }, [isAuthenticated])
 
   useEffect(() => {
-    const hasRunningJobs = history.some((entry) => entry.status === 'queued' || entry.status === 'running')
+    const hasRunningJobs = history.some((entry) => ['queued', 'running', 'paused', 'blocked_approval'].includes(entry.status))
     if (!hasRunningJobs) return undefined
 
     const timer = setInterval(() => {

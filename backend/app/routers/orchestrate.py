@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Condition, Lock, Thread
 from typing import Optional
 from uuid import uuid4
 
@@ -20,6 +20,140 @@ from app.routers.auth import require_admin, require_run_permission
 router = APIRouter(prefix="/api", tags=["orchestrate"])
 _JOB_CANCEL_TOKENS: dict[str, CancellationToken] = {}
 _JOB_CANCEL_LOCK = Lock()
+_JOB_CONTROLS: dict[str, "JobExecutionControl"] = {}
+_JOB_CONTROL_LOCK = Lock()
+
+CANONICAL_STEP_STATES = {
+    "pending",
+    "running",
+    "success",
+    "failed",
+    "skipped",
+    "paused",
+    "blocked_approval",
+}
+
+_STEP_ALIASES = {
+    "create_and_checkout_branch": "prepare_branch",
+    "read_jira_issue": "read_jira",
+    "copilot_agentic_plan": "agentic_implementation",
+}
+
+_STEP_ORDER = [
+    "clone_repository",
+    "read_repo_instructions",
+    "auth_setup",
+    "prepare_branch",
+    "read_jira",
+    "select_copilot_agent",
+    "agentic_implementation",
+    "commit_changes",
+    "push_branch",
+    "create_pr",
+]
+
+
+def _normalize_step_name(name: str | None) -> str:
+    value = str(name or "").strip()
+    if not value:
+        return "unknown"
+    return _STEP_ALIASES.get(value, value)
+
+
+def _normalize_step_state(status: str | None) -> str:
+    value = str(status or "").strip().lower()
+    if value in CANONICAL_STEP_STATES:
+        return value
+    if value in {"queued", "installing", "idle"}:
+        return "running"
+    if value == "cancelled":
+        return "failed"
+    return "running"
+
+
+def _approval_checkpoints_from_env() -> set[str]:
+    raw = os.environ.get("AGENT_FLOW_APPROVAL_CHECKPOINTS", "create_pr")
+    tokens = [item.strip() for item in raw.split(",")]
+    return {_normalize_step_name(item) for item in tokens if item}
+
+
+class JobExecutionControl:
+    def __init__(self, approval_checkpoints: set[str]) -> None:
+        self._approval_checkpoints = set(approval_checkpoints)
+        self._condition = Condition()
+        self._paused = False
+        self._approval_pending_step: str | None = None
+        self._approval_decision: str | None = None
+
+    def pause(self) -> bool:
+        with self._condition:
+            if self._paused:
+                return False
+            self._paused = True
+            return True
+
+    def resume(self) -> bool:
+        with self._condition:
+            if not self._paused:
+                return False
+            self._paused = False
+            self._condition.notify_all()
+            return True
+
+    def begin_approval_if_needed(self, step_name: str) -> bool:
+        step = _normalize_step_name(step_name)
+        with self._condition:
+            if step not in self._approval_checkpoints:
+                return False
+            if self._approval_pending_step is not None:
+                return False
+            self._approval_pending_step = step
+            self._approval_decision = None
+            self._condition.notify_all()
+            return True
+
+    def approve(self) -> bool:
+        with self._condition:
+            if self._approval_pending_step is None:
+                return False
+            self._approval_decision = "approved"
+            self._condition.notify_all()
+            return True
+
+    def reject(self) -> bool:
+        with self._condition:
+            if self._approval_pending_step is None:
+                return False
+            self._approval_decision = "rejected"
+            self._condition.notify_all()
+            return True
+
+    def wait_until_runnable(self, cancel_token: CancellationToken) -> None:
+        with self._condition:
+            while self._paused:
+                if cancel_token.is_cancelled:
+                    return
+                self._condition.wait(timeout=0.2)
+
+    def wait_for_approval_decision(self, cancel_token: CancellationToken) -> str:
+        with self._condition:
+            while self._approval_pending_step is not None and self._approval_decision is None:
+                if cancel_token.is_cancelled:
+                    return "cancelled"
+                self._condition.wait(timeout=0.2)
+
+            decision = self._approval_decision or "approved"
+            self._approval_pending_step = None
+            self._approval_decision = None
+            return decision
+
+    def snapshot(self) -> dict[str, str | bool | None]:
+        with self._condition:
+            return {
+                "paused": self._paused,
+                "approval_pending_step": self._approval_pending_step,
+                "approval_pending": self._approval_pending_step is not None,
+            }
 
 
 class OrchestrateRequest(BaseModel):
@@ -82,6 +216,117 @@ def _workspace_dir_for_job(job_id: str) -> str:
     return str(base_dir / f"agent_flow-agentic-{job_id[:8]}")
 
 
+def _is_terminal_status(status: str) -> bool:
+    return status in {"success", "failed", "cancelled"}
+
+
+def _build_step_logs(progress: list[dict], result_steps: list[dict] | None = None) -> list[dict]:
+    by_step: dict[str, dict] = {}
+
+    for event in progress:
+        step_key = _normalize_step_name(event.get("name"))
+        item = by_step.setdefault(step_key, {"name": step_key, "state": "pending", "events": []})
+        state = _normalize_step_state(event.get("status"))
+        item["state"] = state
+        item["events"].append(
+            {
+                "timestamp": event.get("timestamp"),
+                "status": state,
+                "details": event.get("details"),
+            }
+        )
+
+    for result_step in result_steps or []:
+        step_key = _normalize_step_name(result_step.get("name"))
+        item = by_step.setdefault(step_key, {"name": step_key, "state": "pending", "events": []})
+        item["state"] = _normalize_step_state(result_step.get("status"))
+        if result_step.get("details"):
+            item["events"].append(
+                {
+                    "timestamp": None,
+                    "status": item["state"],
+                    "details": result_step.get("details"),
+                }
+            )
+
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    for step_name in _STEP_ORDER:
+        if step_name in by_step:
+            ordered.append(by_step[step_name])
+            seen.add(step_name)
+        else:
+            ordered.append({"name": step_name, "state": "pending", "events": []})
+
+    for step_name, entry in by_step.items():
+        if step_name not in seen:
+            ordered.append(entry)
+
+    return ordered
+
+
+def _current_and_next_step(step_logs: list[dict], job_status: str) -> tuple[str | None, str | None]:
+    if _is_terminal_status(job_status):
+        return None, None
+
+    current_step = None
+    next_step = None
+    for idx, step in enumerate(step_logs):
+        state = step.get("state")
+        if state in {"running", "paused", "blocked_approval", "failed"}:
+            current_step = step.get("name")
+            if idx + 1 < len(step_logs):
+                next_step = step_logs[idx + 1].get("name")
+            break
+        if state == "pending" and current_step is None:
+            next_step = step.get("name")
+            break
+
+    if current_step is None:
+        for step in step_logs:
+            if step.get("state") == "pending":
+                next_step = step.get("name")
+                break
+    return current_step, next_step
+
+
+def _allowed_actions(job_status: str, control_snapshot: dict | None) -> list[str]:
+    if _is_terminal_status(job_status):
+        return []
+
+    snapshot = control_snapshot or {}
+    if snapshot.get("approval_pending"):
+        return ["approve", "reject", "cancel"]
+    if snapshot.get("paused"):
+        return ["resume", "cancel"]
+    if job_status in {"queued", "running", "paused", "blocked_approval"}:
+        return ["pause", "cancel"]
+    return ["cancel"]
+
+
+def _build_status_payload(job: dict) -> dict:
+    payload = dict(job)
+    progress = list(payload.get("progress") or [])
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    step_logs = _build_step_logs(progress=progress, result_steps=result.get("steps") or [])
+
+    with _JOB_CONTROL_LOCK:
+        control = _JOB_CONTROLS.get(str(job.get("id") or ""))
+    snapshot = control.snapshot() if control is not None else None
+
+    if snapshot and snapshot.get("approval_pending") and payload.get("status") in {"running", "queued"}:
+        payload["status"] = "blocked_approval"
+    elif snapshot and snapshot.get("paused") and payload.get("status") in {"running", "queued"}:
+        payload["status"] = "paused"
+
+    current_step, next_step = _current_and_next_step(step_logs, str(payload.get("status") or ""))
+    payload["step_logs"] = step_logs
+    payload["current_step"] = current_step
+    payload["next_step"] = next_step
+    payload["allowed_actions"] = _allowed_actions(str(payload.get("status") or ""), snapshot)
+    return payload
+
+
 def _build_result_fallback(result: dict | None) -> dict:
     if not isinstance(result, dict):
         return {}
@@ -119,6 +364,8 @@ def _fetch_jira_details(jira_ticket_id: str) -> dict:
 def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
     with _JOB_CANCEL_LOCK:
         cancel_token = _JOB_CANCEL_TOKENS.get(job_id)
+    with _JOB_CONTROL_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
     if cancel_token is None:
         return
 
@@ -126,7 +373,62 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
     history_store.set_job_fields(job_id, status="running", started_at=_now())
 
     def progress_callback(event: dict) -> None:
-        history_store.append_progress(job_id, event)
+        normalized_event = {
+            "timestamp": str(event.get("timestamp") or _now()),
+            "name": _normalize_step_name(event.get("name")),
+            "status": _normalize_step_state(str(event.get("status") or "running")),
+            "details": event.get("details"),
+        }
+
+        if control is not None:
+            control.wait_until_runnable(cancel_token)
+            cancel_token.throw_if_cancelled()
+
+        history_store.append_progress(job_id, normalized_event)
+
+        is_checkpoint = (
+            control is not None
+            and normalized_event["status"] == "running"
+            and control.begin_approval_if_needed(normalized_event["name"])
+        )
+        if is_checkpoint:
+            history_store.set_job_fields(job_id, status="blocked_approval")
+            history_store.append_progress(
+                job_id,
+                {
+                    "timestamp": _now(),
+                    "name": normalized_event["name"],
+                    "status": "blocked_approval",
+                    "details": "Awaiting approval",
+                },
+            )
+
+            decision = control.wait_for_approval_decision(cancel_token)
+            if decision == "rejected":
+                history_store.append_progress(
+                    job_id,
+                    {
+                        "timestamp": _now(),
+                        "name": normalized_event["name"],
+                        "status": "failed",
+                        "details": "Approval rejected",
+                    },
+                )
+                raise OrchestrationError(
+                    f"Execution rejected at approval checkpoint: {normalized_event['name']}"
+                )
+
+            if not cancel_token.is_cancelled:
+                history_store.set_job_fields(job_id, status="running")
+                history_store.append_progress(
+                    job_id,
+                    {
+                        "timestamp": _now(),
+                        "name": normalized_event["name"],
+                        "status": "running",
+                        "details": "Approval granted; continuing",
+                    },
+                )
 
     try:
         result = run_orchestration(
@@ -180,6 +482,8 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
     finally:
         with _JOB_CANCEL_LOCK:
             _JOB_CANCEL_TOKENS.pop(job_id, None)
+        with _JOB_CONTROL_LOCK:
+            _JOB_CONTROLS.pop(job_id, None)
 
 
 def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional[dict] = None) -> dict:
@@ -210,6 +514,8 @@ def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional
 
     with _JOB_CANCEL_LOCK:
         _JOB_CANCEL_TOKENS[job_id] = CancellationToken()
+    with _JOB_CONTROL_LOCK:
+        _JOB_CONTROLS[job_id] = JobExecutionControl(_approval_checkpoints_from_env())
 
     worker = Thread(target=_run_job, args=(job_id, payload), daemon=True)
     worker.start()
@@ -227,7 +533,7 @@ def orchestrate_history(
     include_progress: bool = Query(default=True),
 ):
     items = get_history_store().list_jobs(limit=limit, include_progress=include_progress)
-    return {"items": items}
+    return {"items": [_build_status_payload(item) for item in items]}
 
 
 @router.post("/orchestrate/history/purge")
@@ -249,7 +555,125 @@ def orchestrate_status(job_id: str):
     job = get_history_store().get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Orchestration job not found")
-    return job
+    return _build_status_payload(job)
+
+
+@router.post("/orchestrate/{job_id}/pause")
+def pause_orchestration(job_id: str, _user: dict = Depends(require_run_permission)):
+    history_store = get_history_store()
+    job = history_store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Orchestration job not found")
+
+    status = str(job.get("status") or "")
+    if _is_terminal_status(status):
+        raise HTTPException(status_code=409, detail="Cannot pause a completed job")
+
+    with _JOB_CONTROL_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
+    if control is None:
+        raise HTTPException(status_code=409, detail="Job is not active")
+    snapshot = control.snapshot()
+    if snapshot.get("approval_pending"):
+        raise HTTPException(status_code=409, detail="Cannot pause while awaiting approval")
+    if snapshot.get("paused"):
+        return {"job_id": job_id, "status": "paused", "paused": False}
+
+    control.pause()
+    history_store.set_job_fields(job_id, status="paused")
+    history_store.append_progress(
+        job_id,
+        {
+            "timestamp": _now(),
+            "name": "workflow_control",
+            "status": "paused",
+            "details": "User requested pause",
+        },
+    )
+    return {"job_id": job_id, "status": "paused", "paused": True}
+
+
+@router.post("/orchestrate/{job_id}/resume")
+def resume_orchestration(job_id: str, _user: dict = Depends(require_run_permission)):
+    history_store = get_history_store()
+    job = history_store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Orchestration job not found")
+
+    with _JOB_CONTROL_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
+    if control is None:
+        raise HTTPException(status_code=409, detail="Job is not active")
+
+    if not control.resume():
+        raise HTTPException(status_code=409, detail="Job is not paused")
+
+    history_store.set_job_fields(job_id, status="running")
+    history_store.append_progress(
+        job_id,
+        {
+            "timestamp": _now(),
+            "name": "workflow_control",
+            "status": "running",
+            "details": "User resumed execution",
+        },
+    )
+    return {"job_id": job_id, "status": "running", "resumed": True}
+
+
+def _handle_approval_action(job_id: str, action: str) -> dict:
+    history_store = get_history_store()
+    job = history_store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Orchestration job not found")
+
+    with _JOB_CONTROL_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
+    if control is None:
+        raise HTTPException(status_code=409, detail="Job is not active")
+
+    snapshot = control.snapshot()
+    if not snapshot.get("approval_pending"):
+        raise HTTPException(status_code=409, detail="No approval checkpoint is currently blocked")
+
+    step_name = str(snapshot.get("approval_pending_step") or "checkpoint")
+    if action == "approve":
+        if not control.approve():
+            raise HTTPException(status_code=409, detail="No approval checkpoint is currently blocked")
+        history_store.set_job_fields(job_id, status="running")
+        history_store.append_progress(
+            job_id,
+            {
+                "timestamp": _now(),
+                "name": step_name,
+                "status": "running",
+                "details": "Approval action: approved",
+            },
+        )
+        return {"job_id": job_id, "status": "running", "decision": "approved"}
+
+    if not control.reject():
+        raise HTTPException(status_code=409, detail="No approval checkpoint is currently blocked")
+    history_store.append_progress(
+        job_id,
+        {
+            "timestamp": _now(),
+            "name": step_name,
+            "status": "failed",
+            "details": "Approval action: rejected",
+        },
+    )
+    return {"job_id": job_id, "status": "blocked_approval", "decision": "rejected"}
+
+
+@router.post("/orchestrate/{job_id}/approve")
+def approve_orchestration_checkpoint(job_id: str, _user: dict = Depends(require_run_permission)):
+    return _handle_approval_action(job_id, action="approve")
+
+
+@router.post("/orchestrate/{job_id}/reject")
+def reject_orchestration_checkpoint(job_id: str, _user: dict = Depends(require_run_permission)):
+    return _handle_approval_action(job_id, action="reject")
 
 
 @router.post("/orchestrate/{job_id}/cancel")
@@ -260,7 +684,7 @@ def cancel_orchestration(job_id: str, _user: dict = Depends(require_run_permissi
         raise HTTPException(status_code=404, detail="Orchestration job not found")
 
     status = str(job.get("status") or "")
-    if status in {"success", "failed", "cancelled"}:
+    if _is_terminal_status(status):
         return {"job_id": job_id, "status": status, "cancelled": False}
 
     with _JOB_CANCEL_LOCK:
@@ -276,6 +700,10 @@ def cancel_orchestration(job_id: str, _user: dict = Depends(require_run_permissi
         return {"job_id": job_id, "status": "cancelled", "cancelled": True}
 
     token.cancel()
+    with _JOB_CONTROL_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
+    if control is not None:
+        control.resume()
     history_store.append_progress(
         job_id,
         {
@@ -296,7 +724,7 @@ def delete_orchestration(job_id: str, _admin: dict = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Orchestration job not found")
 
     status = str(job.get("status") or "")
-    if status in {"queued", "running"}:
+    if status in {"queued", "running", "paused", "blocked_approval"}:
         raise HTTPException(status_code=409, detail="Cannot delete a running job. Cancel it first.")
 
     deleted = history_store.delete_job(job_id)

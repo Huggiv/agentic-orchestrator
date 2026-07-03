@@ -419,6 +419,18 @@ body {
   border-color: #3b82f640;
 }
 
+.topnav-status--paused {
+  background: #1f293725;
+  color: #9ca3af;
+  border-color: #6b728050;
+}
+
+.topnav-status--blocked_approval {
+  background: #451a0335;
+  color: #fdba74;
+  border-color: #f59e0b60;
+}
+
 .topnav-status--success {
   background: #14532d30;
   color: #4ade80;
@@ -1066,6 +1078,18 @@ button:hover {
   border: 1px solid #d9770640;
 }
 
+.status-badge.status-paused {
+  background: #1f293725;
+  color: #9ca3af;
+  border: 1px solid #6b728050;
+}
+
+.status-badge.status-blocked_approval {
+  background: #451a0335;
+  color: #fdba74;
+  border: 1px solid #f59e0b60;
+}
+
 .history-meta {
   margin-bottom: 0.4rem;
 }
@@ -1262,6 +1286,18 @@ button:hover {
   color: #60a5fa;
   background: #1e3a5f40;
   border-color: #3b82f640;
+}
+
+.history-step-paused {
+  color: #9ca3af;
+  background: #1f293725;
+  border-color: #6b728050;
+}
+
+.history-step-blocked_approval {
+  color: #fdba74;
+  background: #451a0335;
+  border-color: #f59e0b60;
 }
 
 .history-step-failed {

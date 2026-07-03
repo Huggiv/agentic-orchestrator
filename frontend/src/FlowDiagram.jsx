@@ -4,6 +4,8 @@ const STATUS_COLOR = {
   success: '#1f8f5f',
   skipped: '#f2a93b',
   failed: '#dc3545',
+  paused: '#6b7280',
+  blocked_approval: '#f59e0b',
   installing: '#6f42c1',
 }
 
@@ -13,6 +15,8 @@ const STATUS_SURFACE = {
   success: '#e7f7ef',
   skipped: '#fff4de',
   failed: '#fdecee',
+  paused: '#f3f4f6',
+  blocked_approval: '#ffedd5',
   installing: '#f1ebfb',
 }
 
@@ -22,6 +26,8 @@ const STATUS_LABEL = {
   success: 'Done',
   skipped: 'Skipped',
   failed: 'Failed',
+  paused: 'Paused',
+  blocked_approval: 'Approval',
   installing: 'Init',
 }
 
@@ -146,6 +152,8 @@ function resolveStepStatus(key, progress, jobStatus) {
   if (last.status === 'success') return 'success'
   if (last.status === 'skipped') return 'skipped'
   if (last.status === 'failed')  return 'failed'
+  if (last.status === 'paused') return 'paused'
+  if (last.status === 'blocked_approval') return 'blocked_approval'
   if (last.status === 'installing') return 'installing'
   return 'running'
 }

@@ -24,6 +24,8 @@ const STEP_STATUS_LABELS = {
   failed: 'Failed',
   cancelled: 'Cancelled',
   running: 'Running',
+  paused: 'Paused',
+  blocked_approval: 'Awaiting Approval',
   queued: 'Queued',
   idle: 'Idle',
 }
@@ -78,6 +80,11 @@ const collectHistoryStepData = (entry) => {
     if (lastStartedKey && statusMap[lastStartedKey] !== 'success' && statusMap[lastStartedKey] !== 'skipped') {
       statusMap[lastStartedKey] = 'cancelled'
     }
+  }
+
+  // Reflect interactive execution states on the currently active step.
+  if (entry.current_step && (entry.status === 'paused' || entry.status === 'blocked_approval')) {
+    statusMap[entry.current_step] = entry.status
   }
 
   return { statusMap, detailsMap }
@@ -198,6 +205,8 @@ const STATUS_BADGE = {
   running: { bg: '#1e3a5f40', color: '#60a5fa',  border: '#3b82f640', label: 'running' },
   queued:  { bg: '#1e3a5f40', color: '#60a5fa',  border: '#3b82f640', label: 'queued'  },
   skipped: { bg: '#78350f25', color: '#fbbf24',  border: '#d9770640', label: 'skipped' },
+  paused: { bg: '#1f293725', color: '#9ca3af', border: '#6b728050', label: 'paused' },
+  blocked_approval: { bg: '#451a0335', color: '#fdba74', border: '#f59e0b60', label: 'blocked' },
   idle:    { bg: 'transparent', color: '#94a3b8', border: '#33455530', label: 'idle'   },
 }
 
