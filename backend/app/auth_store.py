@@ -318,7 +318,16 @@ class AuthStore:
 
 
 def _default_auth_db_path() -> str:
-    return os.environ.get("AGENT_FLOW_AUTH_DB_PATH", "/tmp/agent_flow-auth.db")
+    explicit = os.environ.get("AGENT_FLOW_AUTH_DB_PATH")
+    if explicit:
+        return explicit
+
+    history_db = os.environ.get("AGENT_FLOW_HISTORY_DB_PATH")
+    if history_db:
+        history_path = Path(history_db)
+        return str(history_path.with_name("auth.db"))
+
+    return "/tmp/agent_flow-auth.db"
 
 
 def session_expiry_from(now: datetime) -> str:

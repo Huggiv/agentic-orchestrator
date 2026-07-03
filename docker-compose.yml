@@ -8,6 +8,7 @@ services:
     environment:
       - AGENT_FLOW_REPO_BASE_DIR=/tmp/agent_flow-tmp-repos
       - AGENT_FLOW_HISTORY_DB_PATH=/tmp/agent_flow-history/orchestration.db
+      - AGENT_FLOW_AUTH_DB_PATH=/tmp/agent_flow-history/auth.db
       - COPILOT_GITHUB_TOKEN=${COPILOT_GITHUB_TOKEN:-}
       - COPILOT_SESSION_STATE_DIR=/root/.copilot/session-state
     ports:

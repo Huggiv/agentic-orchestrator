@@ -520,6 +520,33 @@ class HistoryStore:
             self._conn.commit()
             return True
 
+    def prune_chat_sessions(self, keep_latest: int = 5) -> int:
+        keep_count = max(1, int(keep_latest))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id
+                FROM chat_sessions
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+
+            if len(rows) <= keep_count:
+                return 0
+
+            stale_ids = [str(row["id"]) for row in rows[keep_count:]]
+            placeholders = ",".join("?" for _ in stale_ids)
+            self._conn.execute(
+                f"DELETE FROM chat_messages WHERE session_id IN ({placeholders})",
+                stale_ids,
+            )
+            self._conn.execute(
+                f"DELETE FROM chat_sessions WHERE id IN ({placeholders})",
+                stale_ids,
+            )
+            self._conn.commit()
+            return len(stale_ids)
+
 
 _history_store: HistoryStore | None = None
 _history_store_lock = Lock()

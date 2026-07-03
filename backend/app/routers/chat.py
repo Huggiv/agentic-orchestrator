@@ -519,14 +519,21 @@ def _append_chat_message(
 
 def _derive_jira_seed_state(prompt: str, issues: list[dict], existing_state: dict[str, Any]) -> dict[str, Any]:
     seeded = _normalize_grooming_state(existing_state)
+    prompt_without_tickets = JIRA_TICKET_PATTERN.sub(" ", prompt or "")
+    cleaned_prompt = " ".join(prompt_without_tickets.split()).strip(" ,.-")
+
     if not seeded.get("problem"):
         seeded["problem"] = str((issues[0].get("summary") if issues else "") or prompt).strip()
     if not seeded.get("user_impact"):
-        seeded["user_impact"] = "Impact inferred from Jira context; refine with user-facing impact details."
+        seeded["user_impact"] = cleaned_prompt or "Impact inferred from Jira context; refine with user-facing impact details."
     if not seeded.get("goals"):
         seeded["goals"] = [
             f"Address Jira scope for {str(issue.get('key') or '').upper()}" for issue in issues if issue.get("key")
         ]
+    if cleaned_prompt:
+        additional_goal = f"Additional requirement from user: {cleaned_prompt}"
+        if additional_goal not in seeded["goals"]:
+            seeded["goals"].append(additional_goal)
     return seeded
 
 
@@ -659,6 +666,7 @@ def create_chat_session(payload: ChatSessionCreateRequest, _user: dict = Depends
         created_at=now,
         metadata=metadata,
     )
+    get_history_store().prune_chat_sessions(keep_latest=5)
     return {
         "session_id": session_id,
         "title": title,
@@ -672,6 +680,7 @@ def create_chat_session(payload: ChatSessionCreateRequest, _user: dict = Depends
 
 @router.get("/chat/sessions")
 def list_chat_sessions(limit: int = Query(default=30, ge=1, le=100), _user: dict = Depends(require_run_permission)):
+    get_history_store().prune_chat_sessions(keep_latest=5)
     sessions = get_history_store().list_chat_sessions(limit=limit)
     return {"sessions": sessions}
 
@@ -800,7 +809,10 @@ def send_chat_session_message(
         }
 
     if not ticket_ids:
-        assistant_text = _respond_with_llm(prompt, selected_model)
+        assistant_text = (
+            "Please share the workflow Jira ticket ID(s) first (for example: AGENT_FLOW-101), "
+            "and include your additional requirements in the same message."
+        )
         metadata["trigger_state"] = "draft"
         metadata["model"] = selected_model
         metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}

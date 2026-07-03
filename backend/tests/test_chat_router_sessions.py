@@ -119,3 +119,32 @@ def test_delete_session_removes_session_and_messages(monkeypatch):
 
     assert get_history_store().get_chat_session(session_id) is None
     assert get_history_store().list_chat_messages(session_id) == []
+
+
+def test_chat_history_keeps_only_latest_five_sessions():
+    with TestClient(app) as client:
+        created_ids = []
+        for idx in range(6):
+            response = client.post(
+                "/api/chat/sessions",
+                json={
+                    "title": f"Session {idx + 1}",
+                    "mode": "interactive",
+                    "client_context": {"active_repository": "owner/repo"},
+                },
+            )
+            response.raise_for_status()
+            created_ids.append(response.json()["session_id"])
+
+        listed = client.get("/api/chat/sessions?limit=30")
+        listed.raise_for_status()
+        sessions = listed.json()["sessions"]
+
+    assert len(sessions) == 5
+    listed_ids = {item["id"] for item in sessions}
+    assert created_ids[-1] in listed_ids
+    assert created_ids[-2] in listed_ids
+    assert created_ids[-3] in listed_ids
+    assert created_ids[-4] in listed_ids
+    assert created_ids[-5] in listed_ids
+    assert created_ids[0] not in listed_ids
