@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -123,7 +124,7 @@ def test_run_orchestration_rejects_empty_branch_before_creating_pr(monkeypatch, 
     monkeypatch.setattr("app.orchestration.requests.post", lambda *args, **kwargs: pytest.fail("PR API should not be called"))
 
     def fake_run(cmd, cwd, env, cancellation_token=None):
-        if cmd[:3] == ["git", "clone", "https://github.com/owner/repo.git"]:
+        if "clone" in cmd:
             Path(cwd).mkdir(parents=True, exist_ok=True)
             Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
             return ""
@@ -243,3 +244,67 @@ def test_build_usage_from_session_logs_prefers_git_changes_override(monkeypatch,
 
     assert usage["changes"] == {"added": 2, "removed": 1}
     assert usage["session_log_found"] is True
+
+
+def test_run_orchestration_retry_idempotency_guards_skip_duplicate_side_effects(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    monkeypatch.setattr("app.orchestration._REPO_BASE_DIR", repo_base)
+    monkeypatch.setattr(
+        "app.orchestration._prepare_env",
+        lambda: {"GITHUB_TOKEN": "github-token", "COPILOT_GITHUB_TOKEN": "copilot-token"},
+    )
+    monkeypatch.setattr(
+        "app.orchestration._normalize_repo",
+        lambda repository: ("https://github.com/owner/repo.git", "owner/repo"),
+    )
+    monkeypatch.setattr("app.orchestration._build_branch_name", lambda jira_ticket_id: "feature/retry-guard")
+    monkeypatch.setattr(
+        "app.orchestration.jira_service.get_issue",
+        lambda ticket_id: {"summary": "Retry test", "description": "", "type": "Story"},
+    )
+    monkeypatch.setattr("app.orchestration._run_copilot_prompt", lambda *args, **kwargs: "copilot output")
+    monkeypatch.setattr("app.orchestration._count_commits_ahead", lambda *args, **kwargs: 1)
+    monkeypatch.setattr("app.orchestration._collect_change_stats", lambda *args, **kwargs: {"added": 1, "removed": 0})
+    monkeypatch.setattr("app.orchestration._build_usage_from_session_logs", lambda *args, **kwargs: {"ai_credits_used": 0.0})
+    monkeypatch.setattr("app.orchestration.requests.post", lambda *args, **kwargs: pytest.fail("PR API should not be called"))
+
+    executed_commands = []
+
+    def fake_run(cmd, cwd, env, cancellation_token=None):
+        executed_commands.append(cmd)
+        if "clone" in cmd:
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+        if cmd[:2] == ["git", "diff"] and "--cached" in cmd:
+            return ""
+        return ""
+
+    monkeypatch.setattr("app.orchestration._run", fake_run)
+
+    result = run_orchestration(
+        jira_ticket_id="AGENT_FLOW-999",
+        repository="owner/repo",
+        base_branch="development",
+        reviewer=None,
+        commit_message="feat(agent_flow-999): automated implementation",
+        change_plan=["Implement", "Test"],
+        retry_context={
+            "retry_mode": "from_failed_step",
+            "start_step": "push_branch",
+            "side_effect_guards": {
+                "commit_success": True,
+                "push_success": True,
+                "pr_success": True,
+                "existing_pr_url": "https://github.com/owner/repo/pull/123",
+            },
+        },
+    )
+
+    assert result["pull_request_url"] == "https://github.com/owner/repo/pull/123"
+    step_status = {step["name"]: step["status"] for step in result["steps"]}
+    assert step_status["commit_changes"] == "skipped"
+    assert step_status["push_branch"] == "skipped"
+    assert step_status["create_pr"] == "skipped"
+
+    assert not any(cmd[:2] == ["git", "commit"] for cmd in executed_commands)
+    assert not any(cmd[:2] == ["git", "push"] for cmd in executed_commands)

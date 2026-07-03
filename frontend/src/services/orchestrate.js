@@ -31,3 +31,16 @@ export async function approveJob(jobId) {
 export async function rejectJob(jobId) {
   return postAction(`/api/orchestrate/${jobId}/reject`)
 }
+
+export async function retryJob(jobId, payload) {
+  const response = await fetch(`/api/orchestrate/${jobId}/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+  })
+  const data = await parseApiPayload(response)
+  if (!response.ok) {
+    throw new Error(data.detail || 'Retry request failed')
+  }
+  return data
+}

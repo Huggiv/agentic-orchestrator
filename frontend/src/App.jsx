@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import ExecutingJobs from './ExecutingJobs'
 import ChatConsole from './ChatConsole'
 import JobFlowSteps, { computeFlowProgress, buildLogRows, RawLogsTable } from './JobFlowSteps'
+import { retryJob } from './services/orchestrate'
 import { getModels, refreshModels } from './services/models'
 import { getSession, logout, canRunWorkflows, canManageHistory, ROLE_LABELS } from './services/auth'
 import LoginPage from './LoginPage'
@@ -306,6 +307,36 @@ export default function App() {
 
       setHistory((prev) => prev.filter((entry) => entry.id !== entryId))
       setRunningJobs((prev) => prev.filter((job) => job.id !== entryId))
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const handleRetryHistoryEntry = async (entry, retryMode) => {
+    const failedStep = entry?.failure_insight?.failed_step || null
+    const retryReason = window.prompt('Retry reason (optional):', 'Recover failed step') || 'Manual retry'
+    try {
+      const payload = {
+        retry_mode: retryMode,
+        reason: retryReason,
+      }
+      if (failedStep) payload.start_step = failedStep
+
+      const response = await retryJob(entry.id, payload)
+      const nextJob = {
+        id: response.job_id,
+        jira_ticket_id: entry.request?.jira_ticket_id || '-',
+        repository: entry.request?.repository || repository,
+        selected_agent: entry.request?.selected_agent || 'SWE',
+        selected_model: entry.request?.selected_model || null,
+      }
+      setRunningJobs((prev) => {
+        const byId = new Map(prev.map((job) => [job.id, job]))
+        byId.set(nextJob.id, nextJob)
+        return Array.from(byId.values())
+      })
+      setActiveTab('executing')
+      await loadHistory()
     } catch (err) {
       setError(err.message)
     }
@@ -971,6 +1002,13 @@ export default function App() {
                         Agent: <strong>{entry.request?.selected_agent || 'SWE'}</strong>
                         {' · '}Model: <strong>{entry.request?.selected_model || 'Auto'}</strong>
                       </span>
+                      {entry.retry_lineage && (
+                        <span style={{ display: 'block', marginTop: '0.25rem', fontSize: '0.74rem', color: '#5b6b79' }}>
+                          Retry Attempt #{entry.retry_lineage.attempt_no || '-'}
+                          {' · '}Parent: {entry.retry_lineage.parent_job_id || '-'}
+                          {' · '}Mode: {entry.retry_lineage.retry_mode || '-'}
+                        </span>
+                      )}
                     </div>
                     <div className="history-header-right">
                       <span className="history-duration-pill">
@@ -993,6 +1031,34 @@ export default function App() {
                   {entry.status === 'failed' && entry.error && (
                     <div className="history-error" style={{ fontStyle: 'italic', fontSize: '0.78rem' }}>
                       ⚠ Failed — click the highlighted step in the flow diagram for details
+                    </div>
+                  )}
+                  {entry.status === 'failed' && entry.failure_insight?.can_retry && (
+                    <div style={{ marginTop: '0.45rem', marginBottom: '0.45rem' }}>
+                      <div style={{ fontSize: '0.76rem', color: '#4e6c80', marginBottom: '0.35rem' }}>
+                        Failed Step: <strong>{entry.failure_insight.failed_step || '-'}</strong>
+                        {' · '}Type: <strong>{entry.failure_insight.error_class || '-'}</strong>
+                      </div>
+                      <div style={{ fontSize: '0.74rem', color: '#61798c', marginBottom: '0.4rem' }}>
+                        {entry.failure_insight.suggested_action}
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => handleRetryHistoryEntry(entry, 'failed_step_only')}
+                        disabled={!canRun}
+                      >
+                        Retry Failed Step Only
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        style={{ marginLeft: '0.45rem' }}
+                        onClick={() => handleRetryHistoryEntry(entry, 'from_failed_step')}
+                        disabled={!canRun}
+                      >
+                        Retry From Failed Step
+                      </button>
                     </div>
                   )}
                   {entry.result && (

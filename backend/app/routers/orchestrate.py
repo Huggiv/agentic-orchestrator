@@ -5,10 +5,10 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Condition, Lock, Thread
-from typing import Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -51,6 +51,8 @@ _STEP_ORDER = [
     "push_branch",
     "create_pr",
 ]
+
+_RETRYABLE_STEP_SET = set(_STEP_ORDER)
 
 
 def _normalize_step_name(name: str | None) -> str:
@@ -165,6 +167,22 @@ class OrchestrateRequest(BaseModel):
     selected_model: Optional[str] = None
     commit_message: str = Field(min_length=3)
     change_plan: list[str] = Field(default_factory=list)
+    jira_context: dict[str, Any] | None = None
+
+
+class RetryRequest(BaseModel):
+    retry_mode: Literal["failed_step_only", "from_failed_step"]
+    start_step: str | None = None
+    override_inputs: dict[str, Any] = Field(default_factory=dict)
+    fallback_agent: str | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_retry_request(self) -> "RetryRequest":
+        normalized_start = _normalize_step_name(self.start_step)
+        if self.start_step and normalized_start not in _RETRYABLE_STEP_SET:
+            raise ValueError(f"Unsupported start_step: {self.start_step}")
+        return self
 
 
 def _extract_agent_name(agent_file: Path) -> str:
@@ -328,6 +346,10 @@ def _build_status_payload(job: dict) -> dict:
     payload["current_step"] = current_step
     payload["next_step"] = next_step
     payload["allowed_actions"] = _allowed_actions(str(payload.get("status") or ""), snapshot)
+    request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+    retry_context = request.get("retry_context") if isinstance(request.get("retry_context"), dict) else None
+    payload["retry_lineage"] = retry_context
+    payload["failure_insight"] = _build_failure_insight(payload, step_logs)
     return payload
 
 
@@ -345,10 +367,135 @@ def _build_result_fallback(result: dict | None) -> dict:
         "selected_agent": result.get("selected_agent"),
         "artifacts": result.get("artifacts") or [],
         "usage": result.get("usage") or {},
+        "retry_context": result.get("retry_context") if isinstance(result.get("retry_context"), dict) else None,
         "warnings": [
             "Full orchestration result payload could not be persisted; stored fallback fields.",
         ],
     }
+
+
+def _extract_step_status(steps: list[dict] | None, step_name: str) -> str | None:
+    for step in steps or []:
+        name = _normalize_step_name(step.get("name"))
+        if name == step_name:
+            return _normalize_step_state(step.get("status"))
+    return None
+
+
+def _infer_failed_step(job: dict) -> str | None:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    step_logs = _build_step_logs(progress=list(job.get("progress") or []), result_steps=result.get("steps") or [])
+    for step in reversed(step_logs):
+        if step.get("state") == "failed":
+            return str(step.get("name"))
+    return None
+
+
+def _classify_failure(error: str | None) -> str:
+    detail = str(error or "").lower()
+    if "authentication" in detail or "token" in detail:
+        return "auth_error"
+    if "approval rejected" in detail or "rejected at approval checkpoint" in detail:
+        return "approval_rejected"
+    if "idempotency guard" in detail:
+        return "idempotency_guard"
+    if "failed" in detail or "error" in detail:
+        return "execution_error"
+    return "unknown"
+
+
+def _build_failure_insight(payload: dict, step_logs: list[dict]) -> dict | None:
+    if str(payload.get("status") or "") != "failed":
+        return None
+
+    failed_step = None
+    for step in reversed(step_logs):
+        if step.get("state") == "failed":
+            failed_step = step.get("name")
+            break
+
+    suggestion = "Review logs and adjust retry inputs before rerunning."
+    if failed_step in {"commit_changes", "push_branch", "create_pr"}:
+        suggestion = "Use retry-from-step and rely on idempotency guard to avoid duplicate side effects."
+    elif failed_step == "agentic_implementation":
+        suggestion = "Retry with override_inputs.change_plan or fallback_agent for safer regeneration."
+
+    return {
+        "failed_step": failed_step,
+        "error_class": _classify_failure(payload.get("error")),
+        "suggested_action": suggestion,
+        "retry_modes": ["failed_step_only", "from_failed_step"] if failed_step else [],
+        "can_retry": bool(failed_step),
+    }
+
+
+def _compute_retry_attempt(parent_job: dict) -> int:
+    request = parent_job.get("request") if isinstance(parent_job.get("request"), dict) else {}
+    retry_ctx = request.get("retry_context") if isinstance(request.get("retry_context"), dict) else {}
+    parent_attempt = int(retry_ctx.get("attempt_no") or 0)
+    return parent_attempt + 1
+
+
+def _build_side_effect_guards(parent_job: dict) -> dict[str, Any]:
+    result = parent_job.get("result") if isinstance(parent_job.get("result"), dict) else {}
+    steps = result.get("steps") if isinstance(result.get("steps"), list) else []
+    return {
+        "commit_success": _extract_step_status(steps, "commit_changes") == "success",
+        "push_success": _extract_step_status(steps, "push_branch") == "success",
+        "pr_success": _extract_step_status(steps, "create_pr") == "success",
+        "existing_pr_url": result.get("pull_request_url"),
+    }
+
+
+def _build_retry_request_payload(parent_job: dict, retry_request: RetryRequest, failed_step: str) -> dict:
+    request = parent_job.get("request") if isinstance(parent_job.get("request"), dict) else {}
+    if not request:
+        raise HTTPException(status_code=409, detail="Parent job request payload is unavailable")
+
+    retry_overrides = retry_request.override_inputs if isinstance(retry_request.override_inputs, dict) else {}
+    allowed_override_keys = {
+        "base_branch",
+        "reviewer",
+        "selected_model",
+        "selected_agent",
+        "commit_message",
+        "change_plan",
+        "jira_context",
+    }
+    invalid_override_keys = sorted(set(retry_overrides) - allowed_override_keys)
+    if invalid_override_keys:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported override_inputs keys: {', '.join(invalid_override_keys)}",
+        )
+
+    selected_agent = str(retry_overrides.get("selected_agent") or request.get("selected_agent") or "").strip() or None
+    if retry_request.fallback_agent and retry_request.fallback_agent.strip():
+        selected_agent = retry_request.fallback_agent.strip()
+
+    payload = {
+        "jira_ticket_id": request.get("jira_ticket_id"),
+        "repository": request.get("repository"),
+        "base_branch": retry_overrides.get("base_branch", request.get("base_branch") or "development"),
+        "reviewer": retry_overrides.get("reviewer", request.get("reviewer")),
+        "selected_agent": selected_agent,
+        "selected_model": retry_overrides.get("selected_model", request.get("selected_model")),
+        "commit_message": retry_overrides.get("commit_message", request.get("commit_message")),
+        "change_plan": retry_overrides.get("change_plan", request.get("change_plan") or []),
+        "jira_context": retry_overrides.get("jira_context", request.get("jira_context")),
+    }
+    if not payload["jira_ticket_id"] or not payload["repository"] or not payload["commit_message"]:
+        raise HTTPException(status_code=409, detail="Parent job payload is incomplete for retry")
+
+    payload["retry_context"] = {
+        "parent_job_id": str(parent_job.get("id") or ""),
+        "attempt_no": _compute_retry_attempt(parent_job),
+        "retry_reason": (retry_request.reason or "").strip() or "Manual retry",
+        "retry_mode": retry_request.retry_mode,
+        "start_step": failed_step,
+        "side_effect_guards": _build_side_effect_guards(parent_job),
+    }
+    return payload
 
 
 def _fetch_jira_details(jira_ticket_id: str) -> dict:
@@ -365,7 +512,7 @@ def _fetch_jira_details(jira_ticket_id: str) -> dict:
     }
 
 
-def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
+def _run_job(job_id: str, payload: OrchestrateRequest, retry_context: dict | None = None) -> None:
     with _JOB_CANCEL_LOCK:
         cancel_token = _JOB_CANCEL_TOKENS.get(job_id)
     with _JOB_CONTROL_LOCK:
@@ -435,19 +582,23 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
                 )
 
     try:
-        result = run_orchestration(
-            jira_ticket_id=payload.jira_ticket_id,
-            repository=payload.repository,
-            base_branch=payload.base_branch,
-            reviewer=payload.reviewer,
-            selected_agent=payload.selected_agent,
-            selected_model=payload.selected_model,
-            commit_message=payload.commit_message,
-            change_plan=payload.change_plan,
-            progress_callback=progress_callback,
-            cancellation_token=cancel_token,
-            run_id=f"agent_flow-agentic-{job_id[:8]}",
-        )
+        run_kwargs = {
+            "jira_ticket_id": payload.jira_ticket_id,
+            "repository": payload.repository,
+            "base_branch": payload.base_branch,
+            "reviewer": payload.reviewer,
+            "selected_agent": payload.selected_agent,
+            "selected_model": payload.selected_model,
+            "commit_message": payload.commit_message,
+            "change_plan": payload.change_plan,
+            "jira_context": payload.jira_context,
+            "progress_callback": progress_callback,
+            "cancellation_token": cancel_token,
+            "run_id": f"agent_flow-agentic-{job_id[:8]}",
+        }
+        if retry_context:
+            run_kwargs["retry_context"] = retry_context
+        result = run_orchestration(**run_kwargs)
     except OrchestrationCancelled:
         history_store.set_job_fields(
             job_id,
@@ -490,7 +641,11 @@ def _run_job(job_id: str, payload: OrchestrateRequest) -> None:
             _JOB_CONTROLS.pop(job_id, None)
 
 
-def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional[dict] = None) -> dict:
+def enqueue_orchestration(
+    payload: OrchestrateRequest,
+    request_context: Optional[dict] = None,
+    retry_context: Optional[dict] = None,
+) -> dict:
     job_id = str(uuid4())
     created_at = _now()
 
@@ -503,12 +658,25 @@ def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional
         "selected_model": payload.selected_model,
         "commit_message": payload.commit_message,
         "change_plan": payload.change_plan,
+        "jira_context": payload.jira_context,
         "jira_url": os.environ.get("JIRA_URL"),
         "workspace_dir": _workspace_dir_for_job(job_id),
-        **_fetch_jira_details(payload.jira_ticket_id),
     }
+    if payload.jira_context:
+        request_payload.update(
+            {
+                "jira_title": payload.jira_context.get("summary", ""),
+                "jira_summary": payload.jira_context.get("summary", ""),
+                "jira_description": payload.jira_context.get("description", ""),
+                "jira_type": payload.jira_context.get("type", ""),
+            }
+        )
+    else:
+        request_payload.update(_fetch_jira_details(payload.jira_ticket_id))
     if request_context:
         request_payload.update(request_context)
+    if retry_context:
+        request_payload["retry_context"] = retry_context
 
     get_history_store().create_job(
         job_id=job_id,
@@ -521,7 +689,7 @@ def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional
     with _JOB_CONTROL_LOCK:
         _JOB_CONTROLS[job_id] = JobExecutionControl(_approval_checkpoints_from_env())
 
-    worker = Thread(target=_run_job, args=(job_id, payload), daemon=True)
+    worker = Thread(target=_run_job, args=(job_id, payload, retry_context), daemon=True)
     worker.start()
     return {"job_id": job_id, "status": "queued"}
 
@@ -529,6 +697,38 @@ def enqueue_orchestration(payload: OrchestrateRequest, request_context: Optional
 @router.post("/orchestrate")
 def orchestrate(payload: OrchestrateRequest, _user: dict = Depends(require_run_permission)):
     return enqueue_orchestration(payload)
+
+
+@router.post("/orchestrate/{job_id}/retry")
+def retry_orchestration(job_id: str, payload: RetryRequest, _user: dict = Depends(require_run_permission)):
+    history_store = get_history_store()
+    parent_job = history_store.get_job(job_id)
+    if not parent_job:
+        raise HTTPException(status_code=404, detail="Orchestration job not found")
+
+    if str(parent_job.get("status") or "") != "failed":
+        raise HTTPException(status_code=409, detail="Retries are only allowed for failed jobs")
+
+    failed_step = _normalize_step_name(payload.start_step)
+    if not payload.start_step:
+        inferred = _infer_failed_step(parent_job)
+        if not inferred:
+            raise HTTPException(status_code=409, detail="Could not infer failed step from parent job")
+        failed_step = inferred
+    if failed_step not in _RETRYABLE_STEP_SET:
+        raise HTTPException(status_code=422, detail=f"Unsupported retry start step: {failed_step}")
+
+    retry_source = _build_retry_request_payload(parent_job, payload, failed_step)
+    retry_context = retry_source.pop("retry_context")
+    retry_payload = OrchestrateRequest(**retry_source)
+    queued = enqueue_orchestration(
+        retry_payload,
+        request_context={"trigger_source": "retry"},
+        retry_context=retry_context,
+    )
+    queued["parent_job_id"] = job_id
+    queued["retry_context"] = retry_context
+    return queued
 
 
 @router.get("/orchestrate/history")

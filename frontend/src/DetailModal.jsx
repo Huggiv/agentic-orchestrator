@@ -37,6 +37,13 @@ export default function DetailModal({ modal, onClose }) {
   const renderExecution = () => (
     <div style={{ padding: '1rem' }}>
       <h3>Execution Steps</h3>
+      {data?.retry_lineage && (
+        <p style={{ fontSize: '0.78rem', color: '#4e6c80' }}>
+          Retry attempt #{data.retry_lineage.attempt_no || '-'} from parent {data.retry_lineage.parent_job_id || '-'}
+          {' · '}Mode: {data.retry_lineage.retry_mode || '-'}
+          {' · '}Start Step: {data.retry_lineage.start_step || '-'}
+        </p>
+      )}
       <ul style={{ maxHeight: '400px', overflowY: 'auto' }}>
         {(data?.result?.steps || []).map((step, idx) => (
           <li key={idx}>

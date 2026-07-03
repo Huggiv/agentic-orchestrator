@@ -490,3 +490,194 @@ def test_purge_history_endpoint_returns_deleted_count(monkeypatch):
         payload = response.json()
 
     assert payload == {"deleted": 4, "days": 30}
+
+
+def test_retry_failed_job_enqueues_with_lineage_and_idempotency_guards(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    store = get_history_store()
+    parent_id = "job-parent-1"
+    store.create_job(
+        job_id=parent_id,
+        created_at="2026-07-01T10:00:00+00:00",
+        request_payload={
+            "jira_ticket_id": "AGENT_FLOW-900",
+            "repository": "owner/repo",
+            "base_branch": "development",
+            "reviewer": None,
+            "selected_agent": "SWE",
+            "selected_model": None,
+            "commit_message": "feat(agent_flow-900): automated implementation",
+            "change_plan": ["Implement", "Test"],
+        },
+    )
+    store.set_job_fields(
+        parent_id,
+        status="failed",
+        finished_at="2026-07-01T10:10:00+00:00",
+        error="Push failed",
+        result={
+            "steps": [
+                {"name": "commit_changes", "status": "success"},
+                {"name": "push_branch", "status": "failed"},
+            ],
+            "pull_request_url": None,
+        },
+    )
+    store.append_progress(
+        parent_id,
+        {
+            "timestamp": "2026-07-01T10:09:00+00:00",
+            "name": "push_branch",
+            "status": "failed",
+            "details": "network timeout",
+        },
+    )
+
+    captured = {}
+
+    def fake_enqueue(payload, request_context=None, retry_context=None):
+        captured["payload"] = payload
+        captured["request_context"] = request_context
+        captured["retry_context"] = retry_context
+        return {"job_id": "retry-job-1", "status": "queued"}
+
+    monkeypatch.setattr("app.routers.orchestrate.enqueue_orchestration", fake_enqueue)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/orchestrate/{parent_id}/retry",
+            json={"retry_mode": "from_failed_step", "reason": "recover push step"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+    assert payload["job_id"] == "retry-job-1"
+    assert payload["parent_job_id"] == parent_id
+    assert captured["request_context"]["trigger_source"] == "retry"
+    assert captured["payload"].jira_ticket_id == "AGENT_FLOW-900"
+    assert captured["retry_context"]["parent_job_id"] == parent_id
+    assert captured["retry_context"]["attempt_no"] == 1
+    assert captured["retry_context"]["start_step"] == "push_branch"
+    assert captured["retry_context"]["side_effect_guards"]["commit_success"] is True
+
+    reset_history_store_for_tests()
+
+
+def test_retry_rejects_non_failed_parent(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    store = get_history_store()
+    parent_id = "job-parent-2"
+    store.create_job(
+        job_id=parent_id,
+        created_at="2026-07-01T10:00:00+00:00",
+        request_payload={
+            "jira_ticket_id": "AGENT_FLOW-901",
+            "repository": "owner/repo",
+            "base_branch": "development",
+            "commit_message": "feat(agent_flow-901): automated implementation",
+            "change_plan": ["Implement"],
+        },
+    )
+    store.set_job_fields(parent_id, status="success", finished_at="2026-07-01T10:10:00+00:00", result={"steps": []})
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/orchestrate/{parent_id}/retry",
+            json={"retry_mode": "failed_step_only"},
+        )
+
+    assert response.status_code == 409
+    reset_history_store_for_tests()
+
+
+def test_retry_rejects_unsupported_override_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    store = get_history_store()
+    parent_id = "job-parent-3"
+    store.create_job(
+        job_id=parent_id,
+        created_at="2026-07-01T10:00:00+00:00",
+        request_payload={
+            "jira_ticket_id": "AGENT_FLOW-902",
+            "repository": "owner/repo",
+            "base_branch": "development",
+            "commit_message": "feat(agent_flow-902): automated implementation",
+            "change_plan": ["Implement"],
+        },
+    )
+    store.set_job_fields(parent_id, status="failed", finished_at="2026-07-01T10:10:00+00:00", error="failed")
+    store.append_progress(
+        parent_id,
+        {
+            "timestamp": "2026-07-01T10:09:00+00:00",
+            "name": "agentic_implementation",
+            "status": "failed",
+            "details": "failure",
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/orchestrate/{parent_id}/retry",
+            json={
+                "retry_mode": "failed_step_only",
+                "override_inputs": {"repository": "other/repo"},
+            },
+        )
+
+    assert response.status_code == 422
+    reset_history_store_for_tests()
+
+
+def test_failed_status_exposes_failure_insight_and_retry_lineage(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    store = get_history_store()
+    parent_id = "job-parent-4"
+    store.create_job(
+        job_id=parent_id,
+        created_at="2026-07-01T10:00:00+00:00",
+        request_payload={
+            "jira_ticket_id": "AGENT_FLOW-903",
+            "repository": "owner/repo",
+            "base_branch": "development",
+            "commit_message": "feat(agent_flow-903): automated implementation",
+            "change_plan": ["Implement"],
+            "retry_context": {
+                "parent_job_id": "job-root",
+                "attempt_no": 2,
+                "retry_reason": "Manual",
+                "retry_mode": "from_failed_step",
+                "start_step": "create_pr",
+            },
+        },
+    )
+    store.set_job_fields(parent_id, status="failed", finished_at="2026-07-01T10:10:00+00:00", error="create_pr failed")
+    store.append_progress(
+        parent_id,
+        {
+            "timestamp": "2026-07-01T10:09:00+00:00",
+            "name": "create_pr",
+            "status": "failed",
+            "details": "API error",
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/orchestrate/{parent_id}")
+        response.raise_for_status()
+        payload = response.json()
+
+    assert payload["failure_insight"]["failed_step"] == "create_pr"
+    assert payload["failure_insight"]["can_retry"] is True
+    assert payload["retry_lineage"]["attempt_no"] == 2
+    assert payload["retry_lineage"]["parent_job_id"] == "job-root"
+
+    reset_history_store_for_tests()

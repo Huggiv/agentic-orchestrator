@@ -123,6 +123,20 @@ export default function HistoryGrid({ history = [], onSelectDetail }) {
       width: 120,
     },
     {
+      field: 'retry_lineage.attempt_no',
+      headerName: 'Retry #',
+      valueGetter: (params) => params.data?.retry_lineage?.attempt_no ?? '-',
+      sortable: true,
+      width: 100,
+    },
+    {
+      field: 'retry_lineage.parent_job_id',
+      headerName: 'Parent Job',
+      valueGetter: (params) => params.data?.retry_lineage?.parent_job_id ?? '-',
+      sortable: true,
+      width: 220,
+    },
+    {
       field: 'created_at',
       headerName: 'Created',
       sortable: true,

@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import requests
 
@@ -66,6 +66,66 @@ class StepResult:
     name: str
     status: str
     details: str | None = None
+
+
+_STEP_ALIASES = {
+    "create_and_checkout_branch": "prepare_branch",
+    "read_jira_issue": "read_jira",
+    "copilot_agentic_plan": "agentic_implementation",
+}
+
+_STEP_ORDER = [
+    "clone_repository",
+    "read_repo_instructions",
+    "auth_setup",
+    "prepare_branch",
+    "read_jira",
+    "select_copilot_agent",
+    "agentic_implementation",
+    "commit_changes",
+    "push_branch",
+    "create_pr",
+]
+
+
+def _normalize_step_name(name: str | None) -> str:
+    value = str(name or "").strip()
+    if not value:
+        return "unknown"
+    return _STEP_ALIASES.get(value, value)
+
+
+def _required_retry_prerequisites(start_step: str) -> set[str]:
+    prerequisites = {
+        "clone_repository",
+        "read_repo_instructions",
+        "auth_setup",
+        "prepare_branch",
+    }
+    if start_step in {
+        "read_jira",
+        "select_copilot_agent",
+        "agentic_implementation",
+        "commit_changes",
+        "push_branch",
+        "create_pr",
+    }:
+        prerequisites.add("read_jira")
+    if start_step in {
+        "select_copilot_agent",
+        "agentic_implementation",
+        "commit_changes",
+        "push_branch",
+        "create_pr",
+    }:
+        prerequisites.add("select_copilot_agent")
+    if start_step in {"commit_changes", "push_branch", "create_pr"}:
+        prerequisites.add("agentic_implementation")
+    if start_step in {"push_branch", "create_pr"}:
+        prerequisites.add("commit_changes")
+    if start_step in {"create_pr"}:
+        prerequisites.add("push_branch")
+    return prerequisites
 
 
 COPILOT_AUTH_ERROR = (
@@ -658,6 +718,8 @@ def run_orchestration(
     progress_callback: Callable[[dict], None] | None = None,
     cancellation_token: CancellationToken | None = None,
     run_id: str | None = None,
+    retry_context: dict | None = None,
+    jira_context: dict[str, Any] | None = None,
 ) -> dict:
     if cancellation_token:
         cancellation_token.throw_if_cancelled()
@@ -672,99 +734,148 @@ def run_orchestration(
     copilot_session_ids: list[str] = []
     repo_instructions = []
 
+    retry_mode = str((retry_context or {}).get("retry_mode") or "full")
+    retry_start_step = _normalize_step_name((retry_context or {}).get("start_step"))
+    side_effect_guards = (retry_context or {}).get("side_effect_guards")
+    if not isinstance(side_effect_guards, dict):
+        side_effect_guards = {}
+
+    def should_run_step(step_name: str) -> bool:
+        if retry_mode not in {"failed_step_only", "from_failed_step"}:
+            return True
+        if retry_start_step not in _STEP_ORDER:
+            return True
+        normalized = _normalize_step_name(step_name)
+        if normalized in _required_retry_prerequisites(retry_start_step):
+            return True
+        if retry_mode == "failed_step_only":
+            return normalized == retry_start_step
+        return _STEP_ORDER.index(normalized) >= _STEP_ORDER.index(retry_start_step)
+
+    def mark_skipped(step_name: str, details: str) -> None:
+        _emit_progress(progress_callback, step_name, "skipped", details)
+        steps.append(StepResult(name=step_name, status="skipped", details=details))
+
     run_id = run_id or f"agent_flow-agentic-{uuid.uuid4().hex[:8]}"
     _REPO_BASE_DIR.mkdir(parents=True, exist_ok=True)
     temp_dir = str(_REPO_BASE_DIR / run_id)
     os.makedirs(temp_dir, exist_ok=True)
     repo_path = str(Path(temp_dir) / "repo")
 
-    _emit_progress(progress_callback, "clone_repository", "running", clone_url)
-    _run(
-        [
-            "git",
-            "-c",
-            f"http.https://github.com/.extraheader={git_auth_header}",
-            "clone",
-            clone_url,
-            repo_path,
-        ],
-        cwd=temp_dir,
-        env=env,
-        cancellation_token=cancellation_token,
-    )
-    _emit_progress(progress_callback, "clone_repository", "success", repo_path)
-    steps.append(StepResult(name="clone_repository", status="success", details=repo_path))
+    if should_run_step("clone_repository"):
+        _emit_progress(progress_callback, "clone_repository", "running", clone_url)
+        _run(
+            [
+                "git",
+                "-c",
+                f"http.https://github.com/.extraheader={git_auth_header}",
+                "clone",
+                clone_url,
+                repo_path,
+            ],
+            cwd=temp_dir,
+            env=env,
+            cancellation_token=cancellation_token,
+        )
+        _emit_progress(progress_callback, "clone_repository", "success", repo_path)
+        steps.append(StepResult(name="clone_repository", status="success", details=repo_path))
+    else:
+        mark_skipped("clone_repository", "Skipped by retry policy")
 
     # Normalize origin explicitly to target repo slug.
     _run(["git", "remote", "set-url", "origin", clone_url], cwd=repo_path, env=env, cancellation_token=cancellation_token)
 
-    _emit_progress(progress_callback, "read_repo_instructions", "running")
-    repo_instructions = _collect_repo_instruction_context(repo_path)
-    _emit_progress(
-        progress_callback,
-        "read_repo_instructions",
-        "success",
-        f"{len(repo_instructions)} file(s)",
-    )
-    steps.append(
-        StepResult(
-            name="read_repo_instructions",
-            status="success",
-            details=f"{len(repo_instructions)} file(s)",
+    if should_run_step("read_repo_instructions"):
+        _emit_progress(progress_callback, "read_repo_instructions", "running")
+        repo_instructions = _collect_repo_instruction_context(repo_path)
+        _emit_progress(
+            progress_callback,
+            "read_repo_instructions",
+            "success",
+            f"{len(repo_instructions)} file(s)",
         )
-    )
-
-    _emit_progress(progress_callback, "auth_setup", "running")
-    _run(["gh", "--version"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-    _run(["gh", "auth", "status"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-    _run(["copilot", "--version"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-    copilot_source = _copilot_auth_source(env)
-    _emit_progress(progress_callback, "auth_setup", "success", copilot_source)
-    steps.append(StepResult(name="auth_setup", status="success", details=copilot_source))
-
-    _emit_progress(progress_callback, "prepare_branch", "running", base_branch)
-    _run(["git", "checkout", base_branch], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-    _run(
-        [
-            "git",
-            "-c",
-            f"http.https://github.com/.extraheader={git_auth_header}",
-            "pull",
-            "--ff-only",
-            "origin",
-            base_branch,
-        ],
-        cwd=repo_path,
-        env=env,
-        cancellation_token=cancellation_token,
-    )
-    _run(["git", "checkout", "-b", branch_name], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-    _emit_progress(progress_callback, "prepare_branch", "success", branch_name)
-    steps.append(StepResult(name="create_and_checkout_branch", status="success", details=branch_name))
-
-    _emit_progress(progress_callback, "read_jira", "running", jira_ticket_id)
-    if cancellation_token:
-        cancellation_token.throw_if_cancelled()
-    issue = jira_service.get_issue(jira_ticket_id)
-    summary = issue.get("summary", "")
-    description = issue.get("description") or ""
-    dod_points = _extract_dod_points(description)
-    _emit_progress(progress_callback, "read_jira", "success", summary or jira_ticket_id)
-    steps.append(StepResult(name="read_jira_issue", status="success", details=summary or jira_ticket_id))
-
-    if selected_agent and selected_agent.strip():
-        selected_agent = selected_agent.strip()
-        selected_agent_reason = "Selected by user input"
+        steps.append(
+            StepResult(
+                name="read_repo_instructions",
+                status="success",
+                details=f"{len(repo_instructions)} file(s)",
+            )
+        )
     else:
-        selected_agent, selected_agent_reason = _select_copilot_agent(issue, change_plan)
-    _emit_progress(progress_callback, "select_copilot_agent", "success", f"{selected_agent} ({selected_agent_reason})")
-    steps.append(
-        StepResult(
-            name="select_copilot_agent",
-            status="success",
-            details=f"{selected_agent}: {selected_agent_reason}",
+        mark_skipped("read_repo_instructions", "Skipped by retry policy")
+
+    if should_run_step("auth_setup"):
+        _emit_progress(progress_callback, "auth_setup", "running")
+        _run(["gh", "--version"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+        _run(["gh", "auth", "status"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+        _run(["copilot", "--version"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+        copilot_source = _copilot_auth_source(env)
+        _emit_progress(progress_callback, "auth_setup", "success", copilot_source)
+        steps.append(StepResult(name="auth_setup", status="success", details=copilot_source))
+    else:
+        mark_skipped("auth_setup", "Skipped by retry policy")
+
+    if should_run_step("prepare_branch"):
+        _emit_progress(progress_callback, "prepare_branch", "running", base_branch)
+        _run(["git", "checkout", base_branch], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+        _run(
+            [
+                "git",
+                "-c",
+                f"http.https://github.com/.extraheader={git_auth_header}",
+                "pull",
+                "--ff-only",
+                "origin",
+                base_branch,
+            ],
+            cwd=repo_path,
+            env=env,
+            cancellation_token=cancellation_token,
         )
-    )
+        _run(["git", "checkout", "-b", branch_name], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+        _emit_progress(progress_callback, "prepare_branch", "success", branch_name)
+        steps.append(StepResult(name="prepare_branch", status="success", details=branch_name))
+    else:
+        mark_skipped("prepare_branch", "Skipped by retry policy")
+
+    issue: dict = {}
+    summary = ""
+    description = ""
+    dod_points: list[str] = []
+    if should_run_step("read_jira"):
+        _emit_progress(progress_callback, "read_jira", "running", jira_ticket_id)
+        if cancellation_token:
+            cancellation_token.throw_if_cancelled()
+        if isinstance(jira_context, dict) and jira_context:
+            issue = dict(jira_context)
+            issue.setdefault("key", jira_ticket_id)
+        else:
+            issue = jira_service.get_issue(jira_ticket_id)
+        summary = issue.get("summary", "")
+        description = issue.get("description") or ""
+        dod_points = _extract_dod_points(description)
+        _emit_progress(progress_callback, "read_jira", "success", summary or jira_ticket_id)
+        steps.append(StepResult(name="read_jira", status="success", details=summary or jira_ticket_id))
+    else:
+        mark_skipped("read_jira", "Skipped by retry policy")
+
+    selected_agent_reason = "Selected by user input" if selected_agent and selected_agent.strip() else "Auto-selected"
+    if should_run_step("select_copilot_agent"):
+        if selected_agent and selected_agent.strip():
+            selected_agent = selected_agent.strip()
+            selected_agent_reason = "Selected by user input"
+        else:
+            selected_agent, selected_agent_reason = _select_copilot_agent(issue, change_plan)
+        _emit_progress(progress_callback, "select_copilot_agent", "success", f"{selected_agent} ({selected_agent_reason})")
+        steps.append(
+            StepResult(
+                name="select_copilot_agent",
+                status="success",
+                details=f"{selected_agent}: {selected_agent_reason}",
+            )
+        )
+    else:
+        mark_skipped("select_copilot_agent", "Skipped by retry policy")
 
     effective_plan = change_plan or [
         "Implement code changes for Jira ticket description",
@@ -772,137 +883,147 @@ def run_orchestration(
         "Update documentation for behavior changes",
     ]
 
-    _emit_progress(progress_callback, "agentic_implementation", "running")
-    # Build a single rich prompt with the full JIRA context so Copilot CLI can
-    # autonomously perform implementation and validation.
-    dod_text = "\n".join(f"- {p}" for p in dod_points) if dod_points else "Not provided"
-    plan_text = "\n".join(f"- {item}" for item in effective_plan)
-    repo_instruction_text = "\n\n".join(
-        f"### {artifact['path']}\n{artifact['content']}" for artifact in repo_instructions
-    )
-    
-    # Store Jira context for implementation.md
-    jira_context = {
-        "ticket_id": jira_ticket_id,
-        "summary": summary,
-        "description": description,
-        "dod_points": dod_points,
-        "type": issue.get("type", ""),
-        "status": issue.get("status", ""),
-        "priority": issue.get("priority", ""),
-    }
-    
-    full_prompt = (
-        f"Repository: {repo_slug}\n"
-        f"Jira Ticket: {jira_ticket_id}\n"
-        f"Selected Copilot Agent: {selected_agent}\n"
-        f"Summary: {summary}\n"
-        f"Description:\n{description}\n\n"
-        f"Definition of Done:\n{dod_text}\n\n"
-        f"Implementation Plan:\n{plan_text}\n\n"
-        f"Repository Instructions From .github:\n{repo_instruction_text or 'None found'}\n\n"
-        "Act as an autonomous coding agent and make code changes in this repository "
-        "to satisfy the Jira ticket and DoD. Use Python and React standard coding "
-        "guidelines, keep Sonar-friendly clean-code practices, and add or update tests "
-        "to validate the implemented behavior. Run the relevant test commands, then "
-        "summarize changed files, test outcomes, and any follow-up risks."
-    )
-    output = _run_copilot_prompt(
-        full_prompt,
-        cwd=repo_path,
-        env=env,
-        agent_name=selected_agent,
-        model=selected_model,
-        cancellation_token=cancellation_token,
-    )
-    session_id = _extract_copilot_session_id(output)
-    if session_id:
-        copilot_session_ids.append(session_id)
-    if output:
-        copilot_notes.append(output)
+    note_artifacts: list[dict] = []
+    if should_run_step("agentic_implementation"):
+        _emit_progress(progress_callback, "agentic_implementation", "running")
+        # Build a single rich prompt with the full JIRA context so Copilot CLI can
+        # autonomously perform implementation and validation.
+        dod_text = "\n".join(f"- {p}" for p in dod_points) if dod_points else "Not provided"
+        plan_text = "\n".join(f"- {item}" for item in effective_plan)
+        repo_instruction_text = "\n\n".join(
+            f"### {artifact['path']}\n{artifact['content']}" for artifact in repo_instructions
+        )
 
-    # Persist generated instructions so the flow produces concrete repo changes.
-    notes_dir = Path(repo_path) / _NOTES_DIR_NAME
-    notes_dir.mkdir(exist_ok=True)
-    notes_file = notes_dir / f"{jira_ticket_id.lower()}-implementation.md"
-    dod_lines = [f"- {point}" for point in dod_points] or ["- Not explicitly provided"]
-    suggestion_lines = [f"### Suggestion {idx + 1}\n{note}\n" for idx, note in enumerate(copilot_notes)]
-    
-    # Build rich notes with full Jira context
-    notes_sections = [
-        f"# Agentic Implementation Notes for {jira_ticket_id}",
-        "",
-        "## Jira Issue Details",
-        f"- **Ticket ID:** {jira_context['ticket_id']}",
-        f"- **Type:** {jira_context['type']}",
-        f"- **Status:** {jira_context['status']}",
-        f"- **Priority:** {jira_context['priority']}",
-        f"- **Summary:** {jira_context['summary']}",
-        "",
-        "## Description",
-        jira_context['description'] or "*No description provided*",
-        "",
-        "## Definition of Done (DoD)",
-        *dod_lines,
-        "",
-        "## Repository",
-        repo_slug,
-        "",
-        "## Implementation Plan",
-        plan_text,
-        "",
-        "## Selected Copilot Agent",
-        f"- **Agent:** {selected_agent}",
-        f"- **Selection Reason:** {selected_agent_reason}",
-        "",
-        "## Copilot Suggestions",
-        *suggestion_lines,
-    ]
-    notes_content = "\n".join(notes_sections)
-    notes_file.write_text(notes_content)
-
-    note_artifacts = [
-        {
-            "path": f"{_NOTES_DIR_NAME}/{notes_file.name}",
-            "content": notes_content,
+        jira_context = {
+            "ticket_id": jira_ticket_id,
+            "summary": summary,
+            "description": description,
+            "dod_points": dod_points,
+            "type": issue.get("type", ""),
+            "status": issue.get("status", ""),
+            "priority": issue.get("priority", ""),
         }
-    ]
 
-    _emit_progress(progress_callback, "agentic_implementation", "success")
-    steps.append(StepResult(name="copilot_agentic_plan", status="success"))
+        full_prompt = (
+            f"Repository: {repo_slug}\n"
+            f"Jira Ticket: {jira_ticket_id}\n"
+            f"Selected Copilot Agent: {selected_agent}\n"
+            f"Summary: {summary}\n"
+            f"Description:\n{description}\n\n"
+            f"Definition of Done:\n{dod_text}\n\n"
+            f"Implementation Plan:\n{plan_text}\n\n"
+            f"Repository Instructions From .github:\n{repo_instruction_text or 'None found'}\n\n"
+            "Act as an autonomous coding agent and make code changes in this repository "
+            "to satisfy the Jira ticket and DoD. Use Python and React standard coding "
+            "guidelines, keep Sonar-friendly clean-code practices, and add or update tests "
+            "to validate the implemented behavior. Run the relevant test commands, then "
+            "summarize changed files, test outcomes, and any follow-up risks."
+        )
+        output = _run_copilot_prompt(
+            full_prompt,
+            cwd=repo_path,
+            env=env,
+            agent_name=selected_agent,
+            model=selected_model,
+            cancellation_token=cancellation_token,
+        )
+        session_id = _extract_copilot_session_id(output)
+        if session_id:
+            copilot_session_ids.append(session_id)
+        if output:
+            copilot_notes.append(output)
+
+        # Persist generated instructions so the flow produces concrete repo changes.
+        notes_dir = Path(repo_path) / _NOTES_DIR_NAME
+        notes_dir.mkdir(exist_ok=True)
+        notes_file = notes_dir / f"{jira_ticket_id.lower()}-implementation.md"
+        dod_lines = [f"- {point}" for point in dod_points] or ["- Not explicitly provided"]
+        suggestion_lines = [f"### Suggestion {idx + 1}\n{note}\n" for idx, note in enumerate(copilot_notes)]
+
+        notes_sections = [
+            f"# Agentic Implementation Notes for {jira_ticket_id}",
+            "",
+            "## Jira Issue Details",
+            f"- **Ticket ID:** {jira_context['ticket_id']}",
+            f"- **Type:** {jira_context['type']}",
+            f"- **Status:** {jira_context['status']}",
+            f"- **Priority:** {jira_context['priority']}",
+            f"- **Summary:** {jira_context['summary']}",
+            "",
+            "## Description",
+            jira_context["description"] or "*No description provided*",
+            "",
+            "## Definition of Done (DoD)",
+            *dod_lines,
+            "",
+            "## Repository",
+            repo_slug,
+            "",
+            "## Implementation Plan",
+            plan_text,
+            "",
+            "## Selected Copilot Agent",
+            f"- **Agent:** {selected_agent}",
+            f"- **Selection Reason:** {selected_agent_reason}",
+            "",
+            "## Copilot Suggestions",
+            *suggestion_lines,
+        ]
+        notes_content = "\n".join(notes_sections)
+        notes_file.write_text(notes_content)
+
+        note_artifacts = [
+            {
+                "path": f"{_NOTES_DIR_NAME}/{notes_file.name}",
+                "content": notes_content,
+            }
+        ]
+
+        _emit_progress(progress_callback, "agentic_implementation", "success")
+        steps.append(StepResult(name="agentic_implementation", status="success"))
+    else:
+        mark_skipped("agentic_implementation", "Skipped by retry policy")
 
     changes_summary = _collect_change_stats(repo_path, env, cancellation_token=cancellation_token)
 
-    _emit_progress(progress_callback, "commit_changes", "running")
-    _run(
-        [
-            "git",
-            "add",
-            "-A",
-            "--",
-            ".",
-            *_COMMIT_EXCLUDE_PATHS,
-        ],
-        cwd=repo_path,
-        env=env,
-        cancellation_token=cancellation_token,
-    )
-    staged = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-    if staged:
-        _run(["git", "config", "user.email", os.environ.get("GIT_AUTHOR_EMAIL", "agent_flow-bot@example.com")], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-        _run(["git", "config", "user.name", os.environ.get("GIT_AUTHOR_NAME", "AGENT_FLOW Agentic Bot")], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-        _run(["git", "commit", "-m", commit_message], cwd=repo_path, env=env, cancellation_token=cancellation_token)
-        _emit_progress(progress_callback, "commit_changes", "success", commit_message)
-        steps.append(StepResult(name="commit_changes", status="success", details=commit_message))
-    else:
-        commits_ahead = _count_commits_ahead(repo_path, env, base_branch, cancellation_token=cancellation_token)
-        if commits_ahead > 0:
-            details = f"Branch already has {commits_ahead} commit(s) ahead of {base_branch}"
-            _emit_progress(progress_callback, "commit_changes", "success", details)
-            steps.append(StepResult(name="commit_changes", status="success", details=details))
+    if should_run_step("commit_changes"):
+        if side_effect_guards.get("commit_success"):
+            details = "Idempotency guard: commit already succeeded in parent attempt"
+            _emit_progress(progress_callback, "commit_changes", "skipped", details)
+            steps.append(StepResult(name="commit_changes", status="skipped", details=details))
         else:
-            _emit_progress(progress_callback, "commit_changes", "skipped", "No file changes to commit")
-            steps.append(StepResult(name="commit_changes", status="skipped", details="No file changes to commit"))
+            _emit_progress(progress_callback, "commit_changes", "running")
+            _run(
+                [
+                    "git",
+                    "add",
+                    "-A",
+                    "--",
+                    ".",
+                    *_COMMIT_EXCLUDE_PATHS,
+                ],
+                cwd=repo_path,
+                env=env,
+                cancellation_token=cancellation_token,
+            )
+            staged = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+            if staged:
+                _run(["git", "config", "user.email", os.environ.get("GIT_AUTHOR_EMAIL", "agent_flow-bot@example.com")], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+                _run(["git", "config", "user.name", os.environ.get("GIT_AUTHOR_NAME", "AGENT_FLOW Agentic Bot")], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+                _run(["git", "commit", "-m", commit_message], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+                _emit_progress(progress_callback, "commit_changes", "success", commit_message)
+                steps.append(StepResult(name="commit_changes", status="success", details=commit_message))
+            else:
+                commits_ahead = _count_commits_ahead(repo_path, env, base_branch, cancellation_token=cancellation_token)
+                if commits_ahead > 0:
+                    details = f"Branch already has {commits_ahead} commit(s) ahead of {base_branch}"
+                    _emit_progress(progress_callback, "commit_changes", "success", details)
+                    steps.append(StepResult(name="commit_changes", status="success", details=details))
+                else:
+                    _emit_progress(progress_callback, "commit_changes", "skipped", "No file changes to commit")
+                    steps.append(StepResult(name="commit_changes", status="skipped", details="No file changes to commit"))
+    else:
+        mark_skipped("commit_changes", "Skipped by retry policy")
 
     commits_ahead = _count_commits_ahead(repo_path, env, base_branch, cancellation_token=cancellation_token)
     if commits_ahead <= 0:
@@ -910,68 +1031,85 @@ def run_orchestration(
             f"No commits were created on {branch_name}; create at least one commit before opening a pull request against {base_branch}."
         )
 
-    _emit_progress(progress_callback, "push_branch", "running")
-    _run(
-        [
-            "git",
-            "-c",
-            f"http.https://github.com/.extraheader={git_auth_header}",
-            "push",
-            "-u",
-            "origin",
-            branch_name,
-        ],
-        cwd=repo_path,
-        env=env,
-        cancellation_token=cancellation_token,
-    )
-    _emit_progress(progress_callback, "push_branch", "success", branch_name)
-    steps.append(StepResult(name="push_branch", status="success", details=branch_name))
+    if should_run_step("push_branch"):
+        if side_effect_guards.get("push_success"):
+            details = "Idempotency guard: push already succeeded in parent attempt"
+            _emit_progress(progress_callback, "push_branch", "skipped", details)
+            steps.append(StepResult(name="push_branch", status="skipped", details=details))
+        else:
+            _emit_progress(progress_callback, "push_branch", "running")
+            _run(
+                [
+                    "git",
+                    "-c",
+                    f"http.https://github.com/.extraheader={git_auth_header}",
+                    "push",
+                    "-u",
+                    "origin",
+                    branch_name,
+                ],
+                cwd=repo_path,
+                env=env,
+                cancellation_token=cancellation_token,
+            )
+            _emit_progress(progress_callback, "push_branch", "success", branch_name)
+            steps.append(StepResult(name="push_branch", status="success", details=branch_name))
+    else:
+        mark_skipped("push_branch", "Skipped by retry policy")
 
-    _emit_progress(progress_callback, "create_pr", "running")
-    if cancellation_token:
-        cancellation_token.throw_if_cancelled()
-    pr_title = f"{jira_ticket_id}: {commit_message}"
-    pr_body = "Automated agentic flow execution via backend orchestration."
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    pr_response = requests.post(
-        f"https://api.github.com/repos/{repo_slug}/pulls",
-        json={
-            "title": pr_title,
-            "head": branch_name,
-            "base": base_branch,
-            "body": pr_body,
-        },
-        headers=headers,
-        timeout=60,
-    )
-    if pr_response.status_code not in (200, 201):
-        detail = pr_response.text.strip() or f"Failed to create PR for {repo_slug}"
-        raise OrchestrationError(detail)
+    pr_url = str(side_effect_guards.get("existing_pr_url") or "")
+    if should_run_step("create_pr"):
+        if side_effect_guards.get("pr_success") and pr_url:
+            details = "Idempotency guard: pull request already exists from parent attempt"
+            _emit_progress(progress_callback, "create_pr", "skipped", details)
+            steps.append(StepResult(name="create_pr", status="skipped", details=details))
+        else:
+            _emit_progress(progress_callback, "create_pr", "running")
+            if cancellation_token:
+                cancellation_token.throw_if_cancelled()
+            pr_title = f"{jira_ticket_id}: {commit_message}"
+            pr_body = "Automated agentic flow execution via backend orchestration."
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            pr_response = requests.post(
+                f"https://api.github.com/repos/{repo_slug}/pulls",
+                json={
+                    "title": pr_title,
+                    "head": branch_name,
+                    "base": base_branch,
+                    "body": pr_body,
+                },
+                headers=headers,
+                timeout=60,
+            )
+            if pr_response.status_code not in (200, 201):
+                detail = pr_response.text.strip() or f"Failed to create PR for {repo_slug}"
+                raise OrchestrationError(detail)
 
-    pr_payload = pr_response.json()
-    pr_url = pr_payload.get("html_url")
-    pr_number = pr_payload.get("number")
-    if not pr_url:
-        raise OrchestrationError("PR creation succeeded but no html_url was returned")
+            pr_payload = pr_response.json()
+            pr_url = pr_payload.get("html_url")
+            pr_number = pr_payload.get("number")
+            if not pr_url:
+                raise OrchestrationError("PR creation succeeded but no html_url was returned")
 
-    if reviewer and pr_number:
-        reviewer_response = requests.post(
-            f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/requested_reviewers",
-            json={"reviewers": [reviewer]},
-            headers=headers,
-            timeout=60,
-        )
-        if reviewer_response.status_code not in (200, 201):
-            detail = reviewer_response.text.strip() or f"Failed to request reviewer: {reviewer}"
-            raise OrchestrationError(detail)
+            if reviewer and pr_number:
+                reviewer_response = requests.post(
+                    f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/requested_reviewers",
+                    json={"reviewers": [reviewer]},
+                    headers=headers,
+                    timeout=60,
+                )
+                if reviewer_response.status_code not in (200, 201):
+                    detail = reviewer_response.text.strip() or f"Failed to request reviewer: {reviewer}"
+                    raise OrchestrationError(detail)
 
-    _emit_progress(progress_callback, "create_pr", "success", pr_url)
-    steps.append(StepResult(name="create_pr", status="success", details=pr_url))
+            _emit_progress(progress_callback, "create_pr", "success", pr_url)
+            steps.append(StepResult(name="create_pr", status="success", details=pr_url))
+    else:
+        mark_skipped("create_pr", "Skipped by retry policy")
 
     usage = _build_usage_from_session_logs(
         copilot_session_ids,
@@ -987,4 +1125,5 @@ def run_orchestration(
         "copilot_notes": copilot_notes,
         "artifacts": note_artifacts,
         "usage": usage,
+        "retry_context": retry_context or None,
     }

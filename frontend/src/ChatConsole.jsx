@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { assignGroomingFlow } from './services/chat'
 
 const CHAT_STORAGE_KEY = 'agentflow.chat.sessions.v1'
 const CHAT_LAUNCHER_POS_KEY = 'agentflow.chat.launcher.position.v1'
@@ -17,6 +18,7 @@ const createSession = () => ({
   id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   title: 'New Chat',
   updatedAt: Date.now(),
+  grooming: null,
   messages: [createInitialAssistantMessage()],
 })
 
@@ -44,6 +46,7 @@ export default function ChatConsole({
   onRefreshModels,
   onJobsQueued,
 }) {
+  const [chatMode, setChatMode] = useState('support')
   const [isOpen, setIsOpen] = useState(false)
   const [launcherPosition, setLauncherPosition] = useState(null)
   const dragRef = useRef({ dragging: false, offsetX: 0, offsetY: 0 })
@@ -52,6 +55,7 @@ export default function ChatConsole({
   const [draft, setDraft] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [isConfirming, setIsConfirming] = useState(false)
+  const [isAssigning, setIsAssigning] = useState(false)
   const [chatError, setChatError] = useState('')
   const [streamStatus, setStreamStatus] = useState('')
   const [streamPhases, setStreamPhases] = useState([])
@@ -63,6 +67,7 @@ export default function ChatConsole({
   )
 
   const messages = activeSession?.messages || []
+  const activeGrooming = activeSession?.grooming || null
 
   const orderedMessages = useMemo(
     () => [...messages].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
@@ -119,6 +124,58 @@ export default function ChatConsole({
     setStreamStatus('')
     setStreamPhases([])
     setChatError('')
+  }
+
+  const assignGrooming = async (messageId, groomingPayload) => {
+    if (!groomingPayload || !groomingPayload.schema || isAssigning) return
+    setIsAssigning(true)
+    setChatError('')
+
+    try {
+      const data = await assignGroomingFlow({
+        grooming: groomingPayload.schema,
+        repository,
+        base_branch: 'development',
+        reviewer: reviewer || null,
+        selected_agent: selectedAgent || null,
+        selected_model: selectedModel || null,
+      })
+
+      if (data?.queued_job) {
+        onJobsQueued([data.queued_job])
+      }
+
+      updateActiveSession((session) => ({
+        ...session,
+        messages: session.messages.map((message) =>
+          message.id === messageId
+            ? {
+                ...message,
+                resolved: true,
+                assignedJob: data?.queued_job || null,
+              }
+            : message
+        ),
+      }))
+
+      updateActiveSession((session) => ({
+        ...session,
+        messages: [
+          ...session.messages,
+          {
+            id: `assistant-assign-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            role: 'assistant',
+            kind: 'text',
+            createdAt: Date.now(),
+            content: data?.assistant_message || 'Grooming assignment queued.',
+          },
+        ],
+      }))
+    } catch (err) {
+      setChatError(err.message)
+    } finally {
+      setIsAssigning(false)
+    }
   }
 
   const deleteSession = (sessionId) => {
@@ -362,11 +419,18 @@ export default function ChatConsole({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userMessage,
+          mode: chatMode,
           repository,
           base_branch: 'development',
           reviewer: reviewer || null,
           selected_agent: selectedAgent,
           selected_model: selectedModel || null,
+          grooming_context: activeGrooming
+            ? {
+                ...activeGrooming.schema,
+                pending_field: activeGrooming.pending_field || null,
+              }
+            : null,
         }),
       })
 
@@ -380,6 +444,25 @@ export default function ChatConsole({
       const queuedJobs = Array.isArray(data?.queued_jobs) ? data.queued_jobs : []
       if (queuedJobs.length > 0) {
         onJobsQueued(queuedJobs)
+      }
+
+      if (data?.mode === 'grooming' && data?.grooming) {
+        updateActiveSession((session) => ({
+          ...session,
+          grooming: data.grooming,
+          messages: [
+            ...session.messages,
+            {
+              id: `grooming-review-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              role: 'assistant',
+              kind: 'grooming_review',
+              createdAt: Date.now(),
+              resolved: false,
+              content: data.groomed_issue || 'Grooming summary updated.',
+              grooming: data.grooming,
+            },
+          ],
+        }))
       }
 
       if (data?.requires_confirmation && data?.plan_id) {
@@ -595,6 +678,14 @@ export default function ChatConsole({
 
         <div className="chat-settings chat-settings--top">
           <label>
+            Mode
+            <select value={chatMode} onChange={(e) => setChatMode(e.target.value)}>
+              <option value="support">Support</option>
+              <option value="grooming">Grooming</option>
+            </select>
+          </label>
+
+          <label>
             Repository
             <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
           </label>
@@ -679,6 +770,28 @@ export default function ChatConsole({
                       ))}
                     </div>
                   )}
+
+                  {message.kind === 'grooming_review' && (
+                    <div className="chat-grooming-review">
+                      <pre>{message.content || 'No grooming summary available.'}</pre>
+                      <p><strong>Recommended flow:</strong> {message.grooming?.recommended_template || '-'}</p>
+                      <p>{message.grooming?.recommendation_rationale || ''}</p>
+                      {(message.grooming?.missing_fields || []).length > 0 && (
+                        <p><strong>Follow-up:</strong> {message.grooming?.follow_up_question || 'Please provide remaining fields.'}</p>
+                      )}
+                      {(message.grooming?.missing_fields || []).length === 0 && (
+                        <div className="chat-confirm-actions">
+                          <button
+                            type="button"
+                            onClick={() => assignGrooming(message.id, message.grooming)}
+                            disabled={isAssigning || message.resolved}
+                          >
+                            {isAssigning ? 'Assigning...' : (message.resolved ? 'Assigned' : 'Assign to Agent and Launch')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </article>
               ))}
 
@@ -694,7 +807,11 @@ export default function ChatConsole({
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="Ask to groom Jira issues or trigger workflow with confirmation..."
+                placeholder={
+                  chatMode === 'grooming'
+                    ? 'Describe requirements, or answer follow-up prompts to complete grooming...'
+                    : 'Ask to groom Jira issues or trigger workflow with confirmation...'
+                }
                 rows={4}
               />
 

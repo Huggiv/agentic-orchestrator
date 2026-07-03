@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter
@@ -21,6 +21,21 @@ from app.routers.orchestrate import OrchestrateRequest, cancel_orchestration, en
 router = APIRouter(prefix="/api", tags=["chat"])
 _CHAT_PLAN_TTL = timedelta(minutes=20)
 _PENDING_CHAT_PLANS: dict[str, dict] = {}
+
+_GROOMING_REQUIRED_FIELDS = [
+    "problem",
+    "user_impact",
+    "goals",
+    "constraints",
+    "acceptance_criteria",
+]
+_GROOMING_FOLLOW_UP_QUESTIONS = {
+    "problem": "What exact problem are we solving?",
+    "user_impact": "Who is impacted today, and what is the user/business impact?",
+    "goals": "What are the key goals for this change? Please provide 2-5 concise bullets.",
+    "constraints": "What constraints should implementation respect (time, security, compatibility, dependencies)?",
+    "acceptance_criteria": "What acceptance criteria define done? Please provide measurable bullets.",
+}
 
 JIRA_TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]+-\d+\b")
 
@@ -226,13 +241,340 @@ def _build_plan_change_plan(prompt: str, issue: dict, groomed_plan: str) -> list
     return plan
 
 
-class ChatMessageRequest(BaseModel):
-    message: str = Field(min_length=1, description="Natural language chat input")
+def _normalize_text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        parts = re.split(r"\n|;|\|", value)
+        cleaned = [part.strip(" -*\t") for part in parts if part.strip(" -*\t")]
+        if cleaned:
+            return cleaned
+    return []
+
+
+def _normalize_grooming_state(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    pending_field = str(source.get("pending_field") or "").strip()
+    if pending_field not in _GROOMING_REQUIRED_FIELDS:
+        pending_field = ""
+    return {
+        "problem": str(source.get("problem") or "").strip(),
+        "user_impact": str(source.get("user_impact") or "").strip(),
+        "goals": _normalize_text_list(source.get("goals")),
+        "constraints": _normalize_text_list(source.get("constraints")),
+        "acceptance_criteria": _normalize_text_list(source.get("acceptance_criteria")),
+        "pending_field": pending_field or None,
+    }
+
+
+def _extract_prefixed_field(prompt: str, aliases: list[str]) -> str:
+    lines = prompt.splitlines()
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        for alias in aliases:
+            if lower.startswith(alias):
+                return line[len(alias) :].strip(" :-")
+    return ""
+
+
+def _extract_prefixed_list(prompt: str, aliases: list[str]) -> list[str]:
+    lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        lower = line.lower()
+        for alias in aliases:
+            if not lower.startswith(alias):
+                continue
+            inline = line[len(alias) :].strip(" :-")
+            collected = _normalize_text_list(inline)
+            for next_line in lines[idx + 1 :]:
+                if ":" in next_line and next_line.lower().split(":", 1)[0] in {
+                    "problem",
+                    "user impact",
+                    "impact",
+                    "goals",
+                    "constraints",
+                    "acceptance criteria",
+                    "criteria",
+                }:
+                    break
+                bullet = next_line.strip(" -*\t")
+                if bullet:
+                    collected.append(bullet)
+            if collected:
+                deduped: list[str] = []
+                seen: set[str] = set()
+                for item in collected:
+                    key = item.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(item)
+                return deduped
+    return []
+
+
+def _missing_grooming_fields(state: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for field_name in _GROOMING_REQUIRED_FIELDS:
+        value = state.get(field_name)
+        if isinstance(value, list):
+            if len(value) == 0:
+                missing.append(field_name)
+        elif not str(value or "").strip():
+            missing.append(field_name)
+    return missing
+
+
+def _apply_prompt_to_grooming_state(prompt: str, state: dict[str, Any]) -> dict[str, Any]:
+    updated = _normalize_grooming_state(state)
+    text = prompt.strip()
+    if not text:
+        return updated
+
+    problem = _extract_prefixed_field(text, ["problem:", "problem statement:"])
+    if problem:
+        updated["problem"] = problem
+
+    impact = _extract_prefixed_field(text, ["user impact:", "impact:"])
+    if impact:
+        updated["user_impact"] = impact
+
+    goals = _extract_prefixed_list(text, ["goals:", "goal:"])
+    if goals:
+        updated["goals"] = goals
+
+    constraints = _extract_prefixed_list(text, ["constraints:", "constraint:"])
+    if constraints:
+        updated["constraints"] = constraints
+
+    acceptance = _extract_prefixed_list(text, ["acceptance criteria:", "criteria:", "acceptance:"])
+    if acceptance:
+        updated["acceptance_criteria"] = acceptance
+
+    captured_any = bool(problem or impact or goals or constraints or acceptance)
+    if not captured_any and updated.get("pending_field") in _GROOMING_REQUIRED_FIELDS:
+        pending_field = str(updated["pending_field"])
+        if pending_field in {"goals", "constraints", "acceptance_criteria"}:
+            updated[pending_field] = _normalize_text_list(text)
+        else:
+            updated[pending_field] = text
+
+    return updated
+
+
+def _recommend_flow_template(state: dict[str, Any]) -> tuple[str, str]:
+    corpus_parts = [
+        state.get("problem", ""),
+        state.get("user_impact", ""),
+        " ".join(state.get("goals") or []),
+        " ".join(state.get("constraints") or []),
+    ]
+    corpus = " ".join(str(part) for part in corpus_parts).lower()
+
+    devops_keywords = (
+        "deploy",
+        "deployment",
+        "pipeline",
+        "ci",
+        "cd",
+        "docker",
+        "kubernetes",
+        "k8s",
+        "terraform",
+        "infra",
+        "infrastructure",
+        "ops",
+        "sre",
+    )
+    bugfix_keywords = (
+        "bug",
+        "fix",
+        "regression",
+        "error",
+        "incident",
+        "broken",
+        "failure",
+    )
+
+    if any(keyword in corpus for keyword in devops_keywords):
+        return "devops", "Detected delivery/infrastructure signals in the requirements."
+    if any(keyword in corpus for keyword in bugfix_keywords):
+        return "bugfix", "Detected stability/regression language indicating a corrective change."
+    return "feature", "Defaulted to feature because requirements describe net-new behavior or capability."
+
+
+def _build_groomed_markdown(state: dict[str, Any]) -> str:
+    goals = state.get("goals") or []
+    constraints = state.get("constraints") or []
+    acceptance = state.get("acceptance_criteria") or []
+    lines = [
+        "## Grooming Summary",
+        f"- Problem: {state.get('problem') or 'TBD'}",
+        f"- User impact: {state.get('user_impact') or 'TBD'}",
+        "",
+        "## Goals",
+    ]
+    lines.extend(f"- {item}" for item in goals) if goals else lines.append("- TBD")
+    lines.append("")
+    lines.append("## Constraints")
+    lines.extend(f"- {item}" for item in constraints) if constraints else lines.append("- TBD")
+    lines.append("")
+    lines.append("## Acceptance Criteria")
+    lines.extend(f"- {item}" for item in acceptance) if acceptance else lines.append("- TBD")
+    return "\n".join(lines)
+
+
+def _build_jira_prefill(state: dict[str, Any], template: str) -> dict[str, Any]:
+    labels = ["agentic-groomed", f"flow-{template}"]
+    summary = _first_sentence(state.get("problem") or "Groomed change request", max_len=90)
+    description_lines = [
+        "h3. Problem",
+        str(state.get("problem") or ""),
+        "",
+        "h3. User Impact",
+        str(state.get("user_impact") or ""),
+        "",
+        "h3. Goals",
+    ]
+    description_lines.extend(f"- {item}" for item in state.get("goals") or [])
+    description_lines.extend(["", "h3. Constraints"])
+    description_lines.extend(f"- {item}" for item in state.get("constraints") or [])
+    description_lines.extend(["", "h3. Acceptance Criteria"])
+    description_lines.extend(f"- {item}" for item in state.get("acceptance_criteria") or [])
+    return {
+        "summary": summary,
+        "description": "\n".join(description_lines).strip(),
+        "acceptance_criteria": list(state.get("acceptance_criteria") or []),
+        "labels": labels,
+    }
+
+
+def _template_change_plan(template: str, state: dict[str, Any]) -> list[str]:
+    goals = list(state.get("goals") or [])
+    constraints = list(state.get("constraints") or [])
+    acceptance = list(state.get("acceptance_criteria") or [])
+    prefix = {
+        "feature": "Implement feature scope based on grooming summary",
+        "bugfix": "Diagnose root cause and implement targeted bug fix",
+        "devops": "Apply infrastructure/delivery improvements with safe rollout",
+    }.get(template, "Implement scope based on grooming summary")
+    plan = [prefix]
+    plan.extend([f"Goal: {item}" for item in goals])
+    plan.extend([f"Constraint: {item}" for item in constraints])
+    if acceptance:
+        plan.append("Validate acceptance criteria before completion")
+    return plan
+
+
+def _build_orchestration_payload_from_grooming(
+    state: dict[str, Any],
+    *,
+    repository: str,
+    base_branch: str,
+    reviewer: str | None,
+    selected_agent: str | None,
+    selected_model: str | None,
+    jira_ticket_id: str | None,
+) -> tuple[dict[str, Any], dict[str, Any], str, str]:
+    template, rationale = _recommend_flow_template(state)
+    jira_prefill = _build_jira_prefill(state, template)
+    synthetic_ticket_id = jira_ticket_id or f"GROOMING-{uuid4().hex[:6].upper()}"
+    payload = {
+        "jira_ticket_id": synthetic_ticket_id,
+        "repository": repository,
+        "base_branch": base_branch,
+        "reviewer": reviewer,
+        "selected_agent": selected_agent,
+        "selected_model": selected_model,
+        "commit_message": f"feat({template}): {_first_sentence(state.get('problem') or 'groomed scope')}",
+        "change_plan": _template_change_plan(template, state),
+        "jira_context": {
+            "key": synthetic_ticket_id,
+            "summary": jira_prefill["summary"],
+            "description": jira_prefill["description"],
+            "type": template,
+            "labels": jira_prefill["labels"],
+        },
+    }
+    return payload, jira_prefill, template, rationale
+
+
+def _build_grooming_response(prompt: str, prior_state: dict[str, Any]) -> dict[str, Any]:
+    state = _apply_prompt_to_grooming_state(prompt, prior_state)
+    missing = _missing_grooming_fields(state)
+    is_complete = len(missing) == 0
+    follow_up_question = _GROOMING_FOLLOW_UP_QUESTIONS.get(missing[0]) if missing else None
+    state["pending_field"] = missing[0] if missing else None
+
+    template, rationale = _recommend_flow_template(state)
+    jira_prefill = _build_jira_prefill(state, template)
+    groomed_issue = _build_groomed_markdown(state)
+
+    if is_complete:
+        assistant_message = (
+            f"Grooming summary complete. Recommended flow template: {template}. "
+            "Review, assign an agent, and launch orchestration when ready."
+        )
+    else:
+        missing_labels = ", ".join(missing)
+        assistant_message = (
+            f"Grooming in progress. Missing fields: {missing_labels}. "
+            f"{follow_up_question or 'Please provide the missing details.'}"
+        )
+
+    return {
+        "assistant_message": assistant_message,
+        "groomed_issue": groomed_issue,
+        "grooming": {
+            "schema": {
+                "problem": state.get("problem") or "",
+                "user_impact": state.get("user_impact") or "",
+                "goals": list(state.get("goals") or []),
+                "constraints": list(state.get("constraints") or []),
+                "acceptance_criteria": list(state.get("acceptance_criteria") or []),
+            },
+            "missing_fields": missing,
+            "follow_up_question": follow_up_question,
+            "is_complete": is_complete,
+            "recommended_template": template,
+            "recommendation_rationale": rationale,
+            "jira_prefill": jira_prefill,
+            "pending_field": state.get("pending_field"),
+        },
+    }
+
+
+class GroomingContext(BaseModel):
+    problem: str | None = None
+    user_impact: str | None = None
+    goals: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    pending_field: str | None = None
+
+
+class GroomingAssignRequest(BaseModel):
+    grooming: GroomingContext
     repository: str = Field(min_length=3, description="GitHub repo as owner/repo or clone URL")
     base_branch: str = Field(default="development", min_length=1)
     reviewer: Optional[str] = None
     selected_agent: Optional[str] = None
     selected_model: Optional[str] = None
+    jira_ticket_id: Optional[str] = None
+
+
+class ChatMessageRequest(BaseModel):
+    message: str = Field(min_length=1, description="Natural language chat input")
+    repository: str = Field(min_length=3, description="GitHub repo as owner/repo or clone URL")
+    base_branch: str = Field(default="development", min_length=1)
+    mode: Literal["support", "grooming"] = "support"
+    reviewer: Optional[str] = None
+    selected_agent: Optional[str] = None
+    selected_model: Optional[str] = None
+    grooming_context: GroomingContext | None = None
 
 
 class ChatConfirmRequest(BaseModel):
@@ -244,6 +586,21 @@ class ChatConfirmRequest(BaseModel):
 def chat_message(payload: ChatMessageRequest):
     _purge_expired_plans()
     prompt = payload.message.strip()
+    if payload.mode == "grooming":
+        prior_state = _normalize_grooming_state(payload.grooming_context.model_dump() if payload.grooming_context else {})
+        result = _build_grooming_response(prompt, prior_state)
+        return {
+            "assistant_message": result["assistant_message"],
+            "tickets": [],
+            "queued_jobs": [],
+            "failed_tickets": [],
+            "requires_confirmation": False,
+            "plan_id": None,
+            "groomed_issue": result["groomed_issue"],
+            "mode": "grooming",
+            "grooming": result["grooming"],
+        }
+
     ticket_ids = _extract_ticket_ids(prompt)
     if not ticket_ids:
         llm_reply = _respond_with_llm(prompt, payload.selected_model)
@@ -255,6 +612,8 @@ def chat_message(payload: ChatMessageRequest):
             "requires_confirmation": False,
             "plan_id": None,
             "groomed_issue": None,
+            "mode": "support",
+            "grooming": None,
         }
 
     failed_tickets: list[dict] = []
@@ -275,6 +634,8 @@ def chat_message(payload: ChatMessageRequest):
             "requires_confirmation": False,
             "plan_id": None,
             "groomed_issue": None,
+            "mode": "support",
+            "grooming": None,
         }
 
     groomed_issue = _groom_with_llm(prompt, valid_ticket_ids, issues, payload.selected_model)
@@ -309,6 +670,8 @@ def chat_message(payload: ChatMessageRequest):
         "requires_confirmation": True,
         "plan_id": plan_id,
         "groomed_issue": groomed_issue,
+        "mode": "support",
+        "grooming": None,
     }
 
 
@@ -317,6 +680,29 @@ def chat_message_stream(payload: ChatMessageRequest):
     def event_stream():
         _purge_expired_plans()
         prompt = payload.message.strip()
+        if payload.mode == "grooming":
+            yield _sse_event("status", {"message": "Collecting grooming requirements"})
+            prior_state = _normalize_grooming_state(payload.grooming_context.model_dump() if payload.grooming_context else {})
+            result = _build_grooming_response(prompt, prior_state)
+            for delta in _chunk_text(result["assistant_message"]):
+                yield _sse_event("assistant_token", {"delta": delta})
+            yield _sse_event(
+                "result",
+                {
+                    "assistant_message": result["assistant_message"],
+                    "tickets": [],
+                    "queued_jobs": [],
+                    "failed_tickets": [],
+                    "requires_confirmation": False,
+                    "plan_id": None,
+                    "groomed_issue": result["groomed_issue"],
+                    "mode": "grooming",
+                    "grooming": result["grooming"],
+                },
+            )
+            yield _sse_event("done", {})
+            return
+
         yield _sse_event("status", {"message": "Analyzing prompt"})
 
         ticket_ids = _extract_ticket_ids(prompt)
@@ -337,6 +723,8 @@ def chat_message_stream(payload: ChatMessageRequest):
                     "requires_confirmation": False,
                     "plan_id": None,
                     "groomed_issue": None,
+                    "mode": "support",
+                    "grooming": None,
                 },
             )
             yield _sse_event("done", {})
@@ -370,6 +758,8 @@ def chat_message_stream(payload: ChatMessageRequest):
                     "requires_confirmation": False,
                     "plan_id": None,
                     "groomed_issue": None,
+                    "mode": "support",
+                    "grooming": None,
                 },
             )
             yield _sse_event("done", {})
@@ -411,6 +801,8 @@ def chat_message_stream(payload: ChatMessageRequest):
             "requires_confirmation": True,
             "plan_id": plan_id,
             "groomed_issue": groomed_issue,
+            "mode": "support",
+            "grooming": None,
         }
         yield _sse_event("result", result_payload)
         yield _sse_event("done", {})
@@ -497,4 +889,47 @@ def chat_confirm(payload: ChatConfirmRequest, _user: dict = Depends(require_run_
         ),
         "queued_jobs": queued_jobs,
         "confirmed": True,
+    }
+
+
+@router.post("/chat/grooming/assign")
+def chat_grooming_assign(payload: GroomingAssignRequest, _user: dict = Depends(require_run_permission)):
+    state = _normalize_grooming_state(payload.grooming.model_dump())
+    missing = _missing_grooming_fields(state)
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Grooming data is incomplete. Missing fields: {', '.join(missing)}",
+        )
+
+    run_payload, jira_prefill, template, rationale = _build_orchestration_payload_from_grooming(
+        state,
+        repository=payload.repository,
+        base_branch=payload.base_branch,
+        reviewer=payload.reviewer,
+        selected_agent=payload.selected_agent,
+        selected_model=payload.selected_model,
+        jira_ticket_id=payload.jira_ticket_id,
+    )
+
+    queued = enqueue_orchestration(
+        OrchestrateRequest(**run_payload),
+        request_context={
+            "trigger_source": "chat_grooming",
+            "grooming_summary": _build_groomed_markdown(state),
+            "recommended_template": template,
+            "recommendation_rationale": rationale,
+            "jira_prefill": jira_prefill,
+        },
+    )
+
+    return {
+        "assistant_message": (
+            f"Assigned to {template} flow and queued orchestration job {queued['job_id']}."
+        ),
+        "recommended_template": template,
+        "recommendation_rationale": rationale,
+        "jira_prefill": jira_prefill,
+        "orchestration_payload": run_payload,
+        "queued_job": {"jira_ticket_id": run_payload["jira_ticket_id"], **queued},
     }

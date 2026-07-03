@@ -2159,6 +2159,30 @@ button:hover {
   font-size: 0.72rem;
 }
 
+.chat-grooming-review {
+  margin-top: 0.35rem;
+  border: 1px solid #3f536f;
+  border-radius: 10px;
+  background: #0f1b2e;
+  padding: 0.55rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.chat-grooming-review pre {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  padding: 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #304764;
+  background: #0b1424;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .chat-phases {
   border: 1px solid #31435e;
   border-radius: 10px;
