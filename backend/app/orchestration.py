@@ -904,6 +904,12 @@ def run_orchestration(
             _emit_progress(progress_callback, "commit_changes", "skipped", "No file changes to commit")
             steps.append(StepResult(name="commit_changes", status="skipped", details="No file changes to commit"))
 
+    commits_ahead = _count_commits_ahead(repo_path, env, base_branch, cancellation_token=cancellation_token)
+    if commits_ahead <= 0:
+        raise OrchestrationError(
+            f"No commits were created on {branch_name}; create at least one commit before opening a pull request against {base_branch}."
+        )
+
     _emit_progress(progress_callback, "push_branch", "running")
     _run(
         [

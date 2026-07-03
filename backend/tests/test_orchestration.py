@@ -11,6 +11,7 @@ from app.orchestration import (
     _extract_copilot_session_id,
     _prepare_env,
     _run_copilot_prompt,
+    run_orchestration,
     _select_copilot_agent,
 )
 
@@ -100,6 +101,49 @@ def test_count_commits_ahead_parses_integer(monkeypatch):
     count = _count_commits_ahead(repo_path="/tmp", env={}, base_branch="development")
 
     assert count == 3
+
+
+def test_run_orchestration_rejects_empty_branch_before_creating_pr(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    monkeypatch.setattr("app.orchestration._REPO_BASE_DIR", repo_base)
+    monkeypatch.setattr(
+        "app.orchestration._prepare_env",
+        lambda: {"GITHUB_TOKEN": "github-token", "COPILOT_GITHUB_TOKEN": "copilot-token"},
+    )
+    monkeypatch.setattr(
+        "app.orchestration._normalize_repo",
+        lambda repository: ("https://github.com/owner/repo.git", "owner/repo"),
+    )
+    monkeypatch.setattr("app.orchestration._build_branch_name", lambda jira_ticket_id: "feature/empty-branch")
+    monkeypatch.setattr(
+        "app.orchestration.jira_service.get_issue",
+        lambda ticket_id: {"summary": "Fix empty branch flow", "description": "", "type": "Story"},
+    )
+    monkeypatch.setattr("app.orchestration._run_copilot_prompt", lambda *args, **kwargs: "copilot output")
+    monkeypatch.setattr("app.orchestration.requests.post", lambda *args, **kwargs: pytest.fail("PR API should not be called"))
+
+    def fake_run(cmd, cwd, env, cancellation_token=None):
+        if cmd[:3] == ["git", "clone", "https://github.com/owner/repo.git"]:
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+            return ""
+        if cmd[:2] == ["git", "diff"] and "--cached" in cmd:
+            return ""
+        if cmd[:2] == ["git", "rev-list"]:
+            return "0"
+        return ""
+
+    monkeypatch.setattr("app.orchestration._run", fake_run)
+
+    with pytest.raises(OrchestrationError, match="No commits were created on feature/empty-branch"):
+        run_orchestration(
+            jira_ticket_id="AGENT_FLOW-999",
+            repository="owner/repo",
+            base_branch="development",
+            reviewer=None,
+            commit_message="feat(agent_flow-999): automated implementation",
+            change_plan=["Implement", "Test"],
+        )
 
 
 def test_extract_copilot_session_id_from_resume_text():
