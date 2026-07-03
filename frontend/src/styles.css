@@ -1584,6 +1584,12 @@ button:hover {
   gap: 0.45rem;
 }
 
+.artifact-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 .artifact-link {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1597,6 +1603,28 @@ button:hover {
 
 .artifact-link:hover {
   background: #263348;
+}
+
+.artifact-download-btn {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #111827;
+  color: #cbd5e1;
+  padding: 0.34rem 0.55rem;
+  font-size: 0.76rem;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.artifact-download-btn:hover {
+  background: #1f2937;
+}
+
+.artifact-download-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: #0f172a;
+  color: #64748b;
 }
 
 .history-collapsible {

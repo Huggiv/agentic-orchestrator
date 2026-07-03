@@ -76,15 +76,19 @@ _STEP_ALIASES = {
 
 _STEP_ORDER = [
     "clone_repository",
+    "checkout_pull_request",
     "read_repo_instructions",
     "auth_setup",
     "prepare_branch",
     "read_jira",
     "select_copilot_agent",
     "agentic_implementation",
+    "agentic_pr_review",
+    "view_artifacts",
     "commit_changes",
     "push_branch",
     "create_pr",
+    "publish_review_comments",
 ]
 
 
@@ -309,6 +313,348 @@ def _extract_dod_points(description: str) -> list[str]:
     return points
 
 
+def _extract_pr_number(jira_ticket_id: str, issue: dict[str, Any], change_plan: list[str]) -> int | None:
+    candidates: list[str] = [
+        str(jira_ticket_id or ""),
+        str(issue.get("key") or ""),
+        str(issue.get("summary") or ""),
+        str(issue.get("description") or ""),
+        "\n".join(change_plan or []),
+    ]
+    for text in candidates:
+        if not text:
+            continue
+        ticket_match = re.search(r"\bPR[-_\s]?(\d+)\b", text, flags=re.IGNORECASE)
+        if ticket_match:
+            return int(ticket_match.group(1))
+        url_match = re.search(r"/pull/(\d+)\b", text)
+        if url_match:
+            return int(url_match.group(1))
+    return None
+
+
+def _extract_pr_review_findings(output: str) -> list[dict[str, Any]]:
+    if not output:
+        return []
+
+    match = re.search(r"FINDINGS_JSON_START\s*(.*?)\s*FINDINGS_JSON_END", output, flags=re.DOTALL)
+    if not match:
+        return []
+
+    raw_payload = match.group(1).strip()
+    if not raw_payload:
+        return []
+
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    findings: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        line = item.get("line")
+        if not path or not isinstance(line, int) or line <= 0:
+            continue
+
+        severity = str(item.get("severity") or "MAJOR").upper().strip()
+        title = str(item.get("title") or "Review finding").strip() or "Review finding"
+        details = str(item.get("details") or "").strip()
+        suggestion = str(item.get("suggestion") or "").strip()
+
+        body_lines = [f"[{severity}] {title}"]
+        if details:
+            body_lines.append("")
+            body_lines.append(details)
+        if suggestion:
+            body_lines.append("")
+            body_lines.append(f"Suggested fix: {suggestion}")
+
+        findings.append(
+            {
+                "path": path,
+                "line": line,
+                "severity": severity,
+                "title": title,
+                "details": details,
+                "suggestion": suggestion,
+                "body": "\n".join(body_lines).strip(),
+            }
+        )
+
+    return findings
+
+
+def _write_pr_review_artifacts(
+    repo_path: str,
+    pr_number: int,
+    review_output: str,
+    findings: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    notes_dir = Path(repo_path) / _NOTES_DIR_NAME
+    notes_dir.mkdir(exist_ok=True)
+
+    flow_file = notes_dir / f"pr-{pr_number}-agentical-flow.md"
+    flow_content = "\n".join(
+        [
+            f"# Agentical Flow for PR #{pr_number}",
+            "",
+            "1. Clone repository",
+            "2. Checkout selected PR",
+            "3. Run agentic review with Copilot CLI using PR-Review agent",
+            "4. Generate review artifacts",
+            "5. Await approval before publishing inline comments",
+        ]
+    )
+    flow_file.write_text(flow_content, encoding="utf-8")
+
+    findings_file = notes_dir / f"pr-{pr_number}-review-findings.md"
+    finding_rows = []
+    for idx, finding in enumerate(findings, start=1):
+        finding_rows.extend(
+            [
+                f"## Finding {idx}",
+                f"- Severity: {finding['severity']}",
+                f"- File: {finding['path']}",
+                f"- Line: {finding['line']}",
+                f"- Title: {finding['title']}",
+                f"- Details: {finding['details'] or '-'}",
+                f"- Suggestion: {finding['suggestion'] or '-'}",
+                "",
+            ]
+        )
+
+    findings_content = "\n".join(
+        [
+            f"# PR Review Findings for PR #{pr_number}",
+            "",
+            "## Extracted Findings",
+            *(finding_rows or ["- No structured inline findings were produced by the review run."]),
+            "",
+            "## Raw Copilot Output",
+            "```text",
+            review_output.strip() or "(empty)",
+            "```",
+        ]
+    )
+    findings_file.write_text(findings_content, encoding="utf-8")
+
+    return [
+        {"path": f"{_NOTES_DIR_NAME}/{flow_file.name}", "content": flow_content},
+        {"path": f"{_NOTES_DIR_NAME}/{findings_file.name}", "content": findings_content},
+    ]
+
+
+def _collect_pr_review_markdown_artifacts(repo_path: str) -> list[dict[str, str]]:
+    review_dir = Path(repo_path) / ".github" / "pr_review"
+    if not review_dir.exists() or not review_dir.is_dir():
+        return []
+
+    artifacts: list[dict[str, str]] = []
+    for path in sorted(review_dir.glob("*.md"))[:_PR_REVIEW_ARTIFACT_MAX_FILES]:
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = path.read_text(encoding="utf-8", errors="replace")
+
+        artifacts.append(
+            {
+                "path": str(path.relative_to(repo_path)),
+                "content": content[:_PR_REVIEW_ARTIFACT_MAX_FILE_CHARS],
+            }
+        )
+
+    return artifacts
+
+
+def _publish_pr_inline_comments(
+    *,
+    repo_slug: str,
+    pr_number: int,
+    findings: list[dict[str, Any]],
+    token: str,
+) -> dict[str, int]:
+    if not findings:
+        return {"posted": 0, "failed": 0}
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    pr_response = requests.get(
+        f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}",
+        headers=headers,
+        timeout=30,
+    )
+    if pr_response.status_code >= 400:
+        detail = pr_response.text.strip() or f"Failed to read PR #{pr_number} metadata"
+        raise OrchestrationError(detail)
+
+    pr_payload = pr_response.json()
+    commit_id = str(((pr_payload.get("head") or {}).get("sha") or "")).strip()
+    if not commit_id:
+        raise OrchestrationError(f"PR #{pr_number} did not return a valid head SHA for inline comments")
+
+    posted = 0
+    failed = 0
+    for finding in findings:
+        comment_response = requests.post(
+            f"https://api.github.com/repos/{repo_slug}/pulls/{pr_number}/comments",
+            headers=headers,
+            json={
+                "body": finding["body"],
+                "commit_id": commit_id,
+                "path": finding["path"],
+                "line": finding["line"],
+                "side": "RIGHT",
+            },
+            timeout=30,
+        )
+        if comment_response.status_code in {200, 201}:
+            posted += 1
+        else:
+            failed += 1
+
+    return {"posted": posted, "failed": failed}
+
+
+def _run_pr_review_orchestration(
+    *,
+    jira_ticket_id: str,
+    issue: dict[str, Any],
+    repository: str,
+    base_branch: str,
+    change_plan: list[str],
+    selected_model: str | None,
+    env: dict[str, str],
+    token: str,
+    clone_url: str,
+    repo_slug: str,
+    git_auth_header: str,
+    repo_path: str,
+    temp_dir: str,
+    steps: list[StepResult],
+    copilot_notes: list[str],
+    copilot_session_ids: list[str],
+    repo_instructions: list[dict[str, str]],
+    progress_callback: Callable[[dict], None] | None,
+    cancellation_token: CancellationToken | None,
+) -> dict[str, Any]:
+    pr_number = _extract_pr_number(jira_ticket_id, issue, change_plan)
+    if pr_number is None:
+        raise OrchestrationError("Unable to determine pull request number for PR-Review workflow")
+
+    _emit_progress(progress_callback, "clone_repository", "running", clone_url)
+    _run(
+        [
+            "git",
+            "-c",
+            f"http.https://github.com/.extraheader={git_auth_header}",
+            "clone",
+            clone_url,
+            repo_path,
+        ],
+        cwd=temp_dir,
+        env=env,
+        cancellation_token=cancellation_token,
+    )
+    _emit_progress(progress_callback, "clone_repository", "success", repo_path)
+    steps.append(StepResult(name="clone_repository", status="success", details=repo_path))
+
+    _run(["git", "remote", "set-url", "origin", clone_url], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+
+    _emit_progress(progress_callback, "checkout_pull_request", "running", f"PR #{pr_number}")
+    _run(["gh", "--version"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+    _run(["gh", "auth", "status"], cwd=repo_path, env=env, cancellation_token=cancellation_token)
+    _run(
+        ["gh", "pr", "checkout", str(pr_number), "--repo", repo_slug],
+        cwd=repo_path,
+        env=env,
+        cancellation_token=cancellation_token,
+    )
+    _emit_progress(progress_callback, "checkout_pull_request", "success", f"PR #{pr_number}")
+    steps.append(StepResult(name="checkout_pull_request", status="success", details=f"PR #{pr_number}"))
+
+    _emit_progress(progress_callback, "agentic_pr_review", "running")
+    repo_instruction_text = "\n\n".join(
+        f"### {artifact['path']}\n{artifact['content']}" for artifact in repo_instructions
+    )
+    review_prompt = (
+        f"Repository: {repository}\n"
+        f"Repo Slug: {repo_slug}\n"
+        f"Base Branch: {base_branch}\n"
+        f"Pull Request Number: {pr_number}\n"
+        "You are executing an automated PR review. Review the checked out pull request and produce:\n"
+        "1) Severity-ranked review findings in markdown.\n"
+        "2) Structured JSON findings for inline comments delimited exactly with FINDINGS_JSON_START and FINDINGS_JSON_END.\n"
+        "Each JSON finding must include: path (string), line (integer), severity (CRITICAL|MAJOR|MINOR), title, details, suggestion.\n"
+        "Only include findings that can be mapped to specific file/line locations in this PR diff.\n"
+        f"Repository instruction context:\n{repo_instruction_text or 'None found'}\n"
+    )
+    review_output = _run_copilot_prompt(
+        review_prompt,
+        cwd=repo_path,
+        env=env,
+        agent_name="PR-Review",
+        model=selected_model,
+        cancellation_token=cancellation_token,
+    )
+    session_id = _extract_copilot_session_id(review_output)
+    if session_id:
+        copilot_session_ids.append(session_id)
+    if review_output:
+        copilot_notes.append(review_output)
+    steps.append(StepResult(name="agentic_pr_review", status="success", details=f"PR #{pr_number}"))
+    _emit_progress(progress_callback, "agentic_pr_review", "success", f"PR #{pr_number}")
+
+    findings = _extract_pr_review_findings(review_output)
+    pr_review_artifacts = _collect_pr_review_markdown_artifacts(repo_path)
+    generated_artifacts = _write_pr_review_artifacts(repo_path, pr_number, review_output, findings)
+    artifacts = [*pr_review_artifacts, *generated_artifacts]
+
+    _emit_progress(progress_callback, "view_artifacts", "running", f"{len(artifacts)} artifact(s)")
+    _emit_progress(progress_callback, "view_artifacts", "success", f"{len(artifacts)} artifact(s)")
+    steps.append(StepResult(name="view_artifacts", status="success", details=f"{len(artifacts)} artifact(s)"))
+
+    _emit_progress(progress_callback, "publish_review_comments", "running", f"{len(findings)} finding(s)")
+    publish_summary = _publish_pr_inline_comments(
+        repo_slug=repo_slug,
+        pr_number=pr_number,
+        findings=findings,
+        token=token,
+    )
+    if publish_summary["failed"] > 0:
+        raise OrchestrationError(
+            f"Failed to publish {publish_summary['failed']} inline review comment(s) for PR #{pr_number}"
+        )
+    publish_details = f"Posted {publish_summary['posted']} inline comment(s); {publish_summary['failed']} failed"
+    _emit_progress(progress_callback, "publish_review_comments", "success", publish_details)
+    steps.append(StepResult(name="publish_review_comments", status="success", details=publish_details))
+
+    usage = _build_usage_from_session_logs(copilot_session_ids)
+    return {
+        "branch_name": f"pr-{pr_number}",
+        "pull_request_url": f"https://github.com/{repo_slug}/pull/{pr_number}",
+        "workspace_dir": temp_dir,
+        "steps": [s.__dict__ for s in steps],
+        "selected_agent": "PR-Review",
+        "copilot_notes": copilot_notes,
+        "artifacts": artifacts,
+        "usage": usage,
+        "review_comment_summary": publish_summary,
+        "retry_context": None,
+    }
+
+
 def _emit_progress(
     cb: Callable[[dict], None] | None,
     name: str,
@@ -451,6 +797,8 @@ _NOTES_DIR_NAME = ".agent_flow_agentic"
 _COMMIT_EXCLUDE_PATHS = [":(exclude).agent_flow_agentic/**", ":(exclude).agent_flow-agentic/**"]
 _REPO_INSTRUCTION_MAX_FILE_CHARS = 2_500
 _REPO_INSTRUCTION_MAX_TOTAL_CHARS = 12_000
+_PR_REVIEW_ARTIFACT_MAX_FILE_CHARS = 40_000
+_PR_REVIEW_ARTIFACT_MAX_FILES = 10
 _NANO_AIU_PER_CREDIT = 1_000_000_000
 _COPILOT_SESSION_STATE_DIR = Path(
     os.environ.get("COPILOT_SESSION_STATE_DIR", str(Path.home() / ".copilot" / "session-state"))
@@ -761,6 +1109,33 @@ def run_orchestration(
     temp_dir = str(_REPO_BASE_DIR / run_id)
     os.makedirs(temp_dir, exist_ok=True)
     repo_path = str(Path(temp_dir) / "repo")
+
+    if str(selected_agent or "").strip() == "PR-Review":
+        pr_issue: dict[str, Any] = {}
+        if isinstance(jira_context, dict) and jira_context:
+            pr_issue = dict(jira_context)
+            pr_issue.setdefault("key", jira_ticket_id)
+        return _run_pr_review_orchestration(
+            jira_ticket_id=jira_ticket_id,
+            issue=pr_issue,
+            repository=repository,
+            base_branch=base_branch,
+            change_plan=change_plan,
+            selected_model=selected_model,
+            env=env,
+            token=token,
+            clone_url=clone_url,
+            repo_slug=repo_slug,
+            git_auth_header=git_auth_header,
+            repo_path=repo_path,
+            temp_dir=temp_dir,
+            steps=steps,
+            copilot_notes=copilot_notes,
+            copilot_session_ids=copilot_session_ids,
+            repo_instructions=repo_instructions,
+            progress_callback=progress_callback,
+            cancellation_token=cancellation_token,
+        )
 
     if should_run_step("clone_repository"):
         _emit_progress(progress_callback, "clone_repository", "running", clone_url)

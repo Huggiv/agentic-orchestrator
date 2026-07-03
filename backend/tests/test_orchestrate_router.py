@@ -525,6 +525,96 @@ def test_pr_review_pulls_rejects_invalid_repository_format():
     assert response.status_code == 422
 
 
+def test_pr_review_publish_comments_requires_approval(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    monkeypatch.setenv("AGENT_FLOW_APPROVAL_CHECKPOINTS", "publish_review_comments")
+    reset_history_store_for_tests()
+
+    def fake_run_orchestration(
+        jira_ticket_id,
+        repository,
+        base_branch,
+        reviewer,
+        selected_agent,
+        selected_model,
+        commit_message,
+        change_plan,
+        progress_callback,
+        cancellation_token,
+        run_id,
+    ):
+        assert selected_agent == "PR-Review"
+        progress_callback(
+            {
+                "name": "publish_review_comments",
+                "status": "running",
+                "details": "1 finding(s)",
+                "timestamp": "2026-07-03T10:00:00+00:00",
+            }
+        )
+        progress_callback(
+            {
+                "name": "publish_review_comments",
+                "status": "success",
+                "details": "Posted 1 inline comment(s); 0 failed",
+                "timestamp": "2026-07-03T10:00:02+00:00",
+            }
+        )
+        return {
+            "branch_name": "pr-42",
+            "pull_request_url": "https://github.com/owner/repo/pull/42",
+            "workspace_dir": f"/tmp/{run_id}",
+            "steps": [{"name": "publish_review_comments", "status": "success"}],
+            "selected_agent": "PR-Review",
+            "artifacts": [
+                {"path": ".agent_flow_agentic/pr-42-agentical-flow.md", "content": "flow"},
+                {"path": ".agent_flow_agentic/pr-42-review-findings.md", "content": "findings"},
+            ],
+            "review_comment_summary": {"posted": 1, "failed": 0},
+            "usage": {"ai_credits_used": 0.1, "estimated_cost_usd": 0.001},
+            "copilot_notes": [],
+        }
+
+    monkeypatch.setattr("app.routers.orchestrate.run_orchestration", fake_run_orchestration)
+
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/api/orchestrate",
+            json={
+                "jira_ticket_id": "PR-42",
+                "repository": "owner/repo",
+                "base_branch": "main",
+                "reviewer": None,
+                "selected_agent": "PR-Review",
+                "commit_message": "chore(pr-review-42): review pull request #42",
+                "change_plan": ["Review pull request #42"],
+                "jira_context": {
+                    "key": "PR-42",
+                    "summary": "PR Review: #42",
+                    "description": "https://github.com/owner/repo/pull/42",
+                    "type": "Pull Request Review",
+                    "status": "Open",
+                    "priority": "Normal",
+                },
+            },
+        )
+        create_response.raise_for_status()
+        job_id = create_response.json()["job_id"]
+
+        blocked_payload = _wait_for_status(client, job_id=job_id, expected="blocked_approval", timeout_seconds=3.0)
+        assert blocked_payload["current_step"] == "publish_review_comments"
+        assert "approve" in blocked_payload["allowed_actions"]
+
+        approve_response = client.post(f"/api/orchestrate/{job_id}/approve")
+        approve_response.raise_for_status()
+        assert approve_response.json()["decision"] == "approved"
+
+        final_payload = _wait_for_status(client, job_id=job_id, expected="success", timeout_seconds=3.0)
+        assert final_payload["result"]["review_comment_summary"] == {"posted": 1, "failed": 0}
+
+    reset_history_store_for_tests()
+
+
 def test_purge_history_endpoint_returns_deleted_count(monkeypatch):
     monkeypatch.setattr("app.routers.orchestrate.get_history_store", lambda: type("S", (), {"purge_old_jobs": lambda self, days: 4})())
 

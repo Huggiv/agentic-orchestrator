@@ -49,6 +49,15 @@ export function StageIcon({ stepKey, color }) {
           <path {...common} d="M11.5 11 14 14l2.5-3" />
         </>
       )
+    case 'checkout_pull_request':
+      return (
+        <>
+          <rect {...common} x="6" y="7" width="16" height="14" rx="2.5" />
+          <path {...common} d="M10 11h8" />
+          <path {...common} d="M10 15h5" />
+          <path {...common} d="m16 14 2 2 3-4" />
+        </>
+      )
     case 'check_gh_cli':
       return (
         <>
@@ -109,6 +118,32 @@ export function StageIcon({ stepKey, color }) {
           <path {...common} d="m20 16 2 2-2 2" />
           <path {...common} d="M14 10 12 22" />
           <path {...common} d="m16 6 1 3 3 1-3 1-1 3-1-3-3-1 3-1z" />
+        </>
+      )
+    case 'agentic_pr_review':
+      return (
+        <>
+          <circle {...common} cx="12" cy="12" r="5" />
+          <path {...common} d="M16 16l4 4" />
+          <path {...common} d="M10 12h4" />
+          <path {...common} d="M12 10v4" />
+        </>
+      )
+    case 'view_artifacts':
+      return (
+        <>
+          <path {...common} d="M8 6h8l4 4v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" />
+          <path {...common} d="M16 6v4h4" />
+          <path {...common} d="M9.5 16h9" />
+          <path {...common} d="M9.5 19h6" />
+        </>
+      )
+    case 'publish_review_comments':
+      return (
+        <>
+          <path {...common} d="M7 8h14v9H12l-4 3v-3H7z" />
+          <path {...common} d="M10 11h8" />
+          <path {...common} d="M10 14h5" />
         </>
       )
     case 'commit_changes':

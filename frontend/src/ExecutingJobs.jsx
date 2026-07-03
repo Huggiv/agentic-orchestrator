@@ -11,7 +11,12 @@ const parseApiPayload = (raw) => {
   }
 }
 
-export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
+export default function ExecutingJobs({
+  runningJobs = [],
+  onJobComplete,
+  onArtifactOpen,
+  onArtifactDownload,
+}) {
   const [jobDetails, setJobDetails] = useState({})
   const [cancelState, setCancelState] = useState({})
   const [actionState, setActionState] = useState({})
@@ -336,6 +341,8 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               idPrefix={job.id}
               entry={{
                 id: job.id,
+                selected_agent: job.selected_agent,
+                jira_ticket_id: job.jira_ticket_id,
                 status: details.status,
                 progress,
                 current_step: details.current_step,
@@ -345,6 +352,35 @@ export default function ExecutingJobs({ runningJobs = [], onJobComplete }) {
               }}
               onFailedStepClick={(stepKey) => setHighlightedSteps((prev) => ({ ...prev, [job.id]: stepKey }))}
             />
+
+            {details.result?.artifacts?.length > 0 && (
+              <details className="history-collapsible" style={{ marginTop: '0.75rem' }}>
+                <summary>Artifacts</summary>
+                <div className="history-artifacts">
+                  {details.result.artifacts.map((artifact) => (
+                    <div className="artifact-actions" key={artifact.path}>
+                      <button
+                        type="button"
+                        className="artifact-link"
+                        onClick={() => onArtifactOpen?.(artifact)}
+                      >
+                        {artifact.path}
+                      </button>
+                      <button
+                        type="button"
+                        className="artifact-download-btn"
+                        onClick={() => onArtifactDownload?.(artifact)}
+                        disabled={!String(artifact.content || '').trim()}
+                        title={!String(artifact.content || '').trim() ? 'Artifact has no content to download' : 'Download artifact'}
+                        aria-label={`Download ${artifact.path}`}
+                      >
+                        Download
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
 
             {(progress.length > 0 || highlightedSteps[job.id]) && (
               <details

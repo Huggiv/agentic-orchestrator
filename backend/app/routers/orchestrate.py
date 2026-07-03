@@ -43,15 +43,19 @@ _STEP_ALIASES = {
 
 _STEP_ORDER = [
     "clone_repository",
+    "checkout_pull_request",
     "read_repo_instructions",
     "auth_setup",
     "prepare_branch",
     "read_jira",
     "select_copilot_agent",
     "agentic_implementation",
+    "agentic_pr_review",
+    "view_artifacts",
     "commit_changes",
     "push_branch",
     "create_pr",
+    "publish_review_comments",
 ]
 
 _RETRYABLE_STEP_SET = set(_STEP_ORDER)
@@ -76,7 +80,7 @@ def _normalize_step_state(status: str | None) -> str:
 
 
 def _approval_checkpoints_from_env() -> set[str]:
-    raw = os.environ.get("AGENT_FLOW_APPROVAL_CHECKPOINTS", "create_pr")
+    raw = os.environ.get("AGENT_FLOW_APPROVAL_CHECKPOINTS", "create_pr,publish_review_comments")
     tokens = [item.strip() for item in raw.split(",")]
     return {_normalize_step_name(item) for item in tokens if item}
 

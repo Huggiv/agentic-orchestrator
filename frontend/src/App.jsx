@@ -154,6 +154,7 @@ export default function App() {
   const [prReviewLoading, setPrReviewLoading] = useState(false)
   const [prReviewError, setPrReviewError] = useState('')
   const [selectedPrNumber, setSelectedPrNumber] = useState('')
+  const [prReviewSelectedModel, setPrReviewSelectedModel] = useState('')
   const [prReviewSubmitting, setPrReviewSubmitting] = useState(false)
   const [history, setHistory] = useState([])
   const [runningJobs, setRunningJobs] = useState([])
@@ -380,6 +381,28 @@ export default function App() {
     setActiveTab('executing')
   }
 
+  const openArtifact = (artifact) => {
+    if (!artifact) return
+    setSelectedArtifact(artifact)
+  }
+
+  const downloadArtifact = (artifact) => {
+    if (!artifact) return
+    const filePath = String(artifact.path || 'artifact.md')
+    const fileName = filePath.split('/').pop() || 'artifact.md'
+    const content = String(artifact.content || '')
+    if (!content.trim()) return
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
+    window.URL.revokeObjectURL(url)
+  }
+
   const validateRepoAndLoadPulls = async () => {
     setPrReviewError('')
     setPrReviewLoading(true)
@@ -425,7 +448,7 @@ export default function App() {
         body: JSON.stringify({
           jira_ticket_id: `PR-${selectedPr.number}`,
           selected_agent: 'PR-Review',
-          selected_model: selectedModel || null,
+          selected_model: prReviewSelectedModel || null,
           repository,
           base_branch: selectedPr.base_ref || 'development',
           reviewer: reviewer || null,
@@ -458,7 +481,7 @@ export default function App() {
           jira_ticket_id: `PR-${selectedPr.number}`,
           repository,
           selected_agent: 'PR-Review',
-          selected_model: selectedModel || null,
+          selected_model: prReviewSelectedModel || null,
         })
         return Array.from(byId.values())
       })
@@ -1005,6 +1028,33 @@ export default function App() {
                   </select>
                 </label>
 
+                <label>
+                  Model
+                  <div className="model-select-row">
+                    <select value={prReviewSelectedModel} onChange={(e) => setPrReviewSelectedModel(e.target.value)}>
+                      <option value=''>Auto</option>
+                      {availableModels.map((model) => (
+                        <option key={model.id} value={model.id}>{model.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="secondary-button icon-refresh-button"
+                      onClick={() => loadModels({ force: true })}
+                      disabled={modelsLoading}
+                      title="Refresh available models"
+                      aria-label="Refresh available models for PR review"
+                    >
+                      <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
+                    </button>
+                  </div>
+                </label>
+
+                <label>
+                  Reviewer (GitHub username)
+                  <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="teammate-name" />
+                </label>
+
                 <button type="submit" disabled={prReviewSubmitting || !selectedPrNumber || !canRun}>
                   {prReviewSubmitting ? 'Starting...' : 'Run PR Review Workflow'}
                 </button>
@@ -1071,7 +1121,12 @@ export default function App() {
 
       {activeTab === 'executing' && (
         <section className="panel">
-          <ExecutingJobs runningJobs={runningJobs} onJobComplete={handleJobComplete} />
+          <ExecutingJobs
+            runningJobs={runningJobs}
+            onJobComplete={handleJobComplete}
+            onArtifactOpen={openArtifact}
+            onArtifactDownload={downloadArtifact}
+          />
         </section>
       )}
 
@@ -1275,14 +1330,25 @@ export default function App() {
                           <summary>Artifacts</summary>
                           <div className="history-artifacts">
                             {entry.result.artifacts.map((artifact) => (
-                              <button
-                                type="button"
-                                className="artifact-link"
-                                key={artifact.path}
-                                onClick={() => setSelectedArtifact(artifact)}
-                              >
-                                {artifact.path}
-                              </button>
+                              <div className="artifact-actions" key={artifact.path}>
+                                <button
+                                  type="button"
+                                  className="artifact-link"
+                                  onClick={() => openArtifact(artifact)}
+                                >
+                                  {artifact.path}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="artifact-download-btn"
+                                  onClick={() => downloadArtifact(artifact)}
+                                  disabled={!String(artifact.content || '').trim()}
+                                  title={!String(artifact.content || '').trim() ? 'Artifact has no content to download' : 'Download artifact'}
+                                  aria-label={`Download ${artifact.path}`}
+                                >
+                                  Download
+                                </button>
+                              </div>
                             ))}
                           </div>
                         </details>

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import ExecutingJobs from './ExecutingJobs'
 
@@ -94,6 +94,84 @@ describe('ExecutingJobs controls', () => {
     expect(within(container).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     expect(within(container).queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
     expect(within(container).queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
+  it('shows artifact view/download actions and calls handlers', async () => {
+    const onArtifactOpen = vi.fn()
+    const onArtifactDownload = vi.fn()
+
+    fetch.mockImplementation(async (url) => {
+      if (String(url).includes('/api/orchestrate/job-artifacts')) {
+        return makeResponse({
+          status: 'blocked_approval',
+          progress: [],
+          allowed_actions: ['approve', 'reject', 'cancel'],
+          current_step: 'publish_review_comments',
+          next_step: null,
+          result: {
+            artifacts: [
+              { path: '.agent_flow_agentic/pr-42-agentical-flow.md', content: '# flow' },
+            ],
+          },
+          error: null,
+        })
+      }
+      return makeResponse({ detail: 'not found' }, false)
+    })
+
+    render(
+      <ExecutingJobs
+        runningJobs={[{ id: 'job-artifacts', jira_ticket_id: 'PR-42', repository: 'owner/repo', selected_agent: 'PR-Review' }]}
+        onArtifactOpen={onArtifactOpen}
+        onArtifactDownload={onArtifactDownload}
+      />
+    )
+
+    expect(await screen.findByRole('button', { name: '.agent_flow_agentic/pr-42-agentical-flow.md' })).toBeInTheDocument()
+    const downloadBtn = await screen.findByRole('button', { name: 'Download .agent_flow_agentic/pr-42-agentical-flow.md' })
+    expect(downloadBtn).toBeInTheDocument()
+
+    await (await screen.findByRole('button', { name: '.agent_flow_agentic/pr-42-agentical-flow.md' })).click()
+    expect(onArtifactOpen).toHaveBeenCalledTimes(1)
+
+    await downloadBtn.click()
+    expect(onArtifactDownload).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables artifact download when content is empty', async () => {
+    const onArtifactDownload = vi.fn()
+
+    fetch.mockImplementation(async (url) => {
+      if (String(url).includes('/api/orchestrate/job-empty-artifact')) {
+        return makeResponse({
+          status: 'running',
+          progress: [],
+          allowed_actions: ['cancel'],
+          current_step: 'view_artifacts',
+          next_step: null,
+          result: {
+            artifacts: [
+              { path: '.agent_flow_agentic/empty.md', content: '' },
+            ],
+          },
+          error: null,
+        })
+      }
+      return makeResponse({ detail: 'not found' }, false)
+    })
+
+    render(
+      <ExecutingJobs
+        runningJobs={[{ id: 'job-empty-artifact', jira_ticket_id: 'PR-77', repository: 'owner/repo', selected_agent: 'PR-Review' }]}
+        onArtifactDownload={onArtifactDownload}
+      />
+    )
+
+    const disabledDownload = await screen.findByRole('button', { name: 'Download .agent_flow_agentic/empty.md' })
+    expect(disabledDownload).toBeDisabled()
+
+    fireEvent.click(disabledDownload)
+    expect(onArtifactDownload).not.toHaveBeenCalled()
   })
 
   it('removes stale action buttons when backend no longer advertises actions', async () => {

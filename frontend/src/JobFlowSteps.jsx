@@ -1,7 +1,7 @@
 import { Fragment } from 'react'
 import { StageIcon } from './FlowDiagram'
 
-export const FLOW_STEPS = [
+export const IMPLEMENTATION_FLOW_STEPS = [
   { key: 'clone_repository', label: 'Clone Repo' },
   { key: 'auth_setup', label: 'Auth Setup' },
   { key: 'prepare_branch', label: 'Prepare Branch' },
@@ -10,6 +10,14 @@ export const FLOW_STEPS = [
   { key: 'commit_changes', label: 'Commit Changes' },
   { key: 'push_branch', label: 'Push Branch' },
   { key: 'create_pr', label: 'Create PR' },
+]
+
+export const PR_REVIEW_FLOW_STEPS = [
+  { key: 'clone_repository', label: 'Clone Repo' },
+  { key: 'checkout_pull_request', label: 'Checkout PR' },
+  { key: 'agentic_pr_review', label: 'Agentic Review' },
+  { key: 'view_artifacts', label: 'View Artifacts' },
+  { key: 'publish_review_comments', label: 'Publish Comments' },
 ]
 
 const STEP_ALIASES = {
@@ -32,11 +40,21 @@ const STEP_STATUS_LABELS = {
 
 const normalizeStepKey = (value) => STEP_ALIASES[value] || value
 
+const isPrReviewFlow = (entry = {}) => {
+  const selectedAgent = String(entry.selected_agent || entry.request?.selected_agent || entry.result?.selected_agent || '').trim()
+  if (selectedAgent === 'PR-Review') return true
+
+  const ticketId = String(entry.jira_ticket_id || entry.request?.jira_ticket_id || '').trim().toUpperCase()
+  return ticketId.startsWith('PR-')
+}
+
+const resolveFlowSteps = (entry = {}) => (isPrReviewFlow(entry) ? PR_REVIEW_FLOW_STEPS : IMPLEMENTATION_FLOW_STEPS)
+
 /**
  * Returns { statusMap, detailsMap } where detailsMap[stepKey] is the last
  * non-empty details string emitted for that step.
  */
-const collectHistoryStepData = (entry) => {
+const collectHistoryStepData = (entry, flowSteps) => {
   const statusMap = {}
   const detailsMap = {}
 
@@ -56,10 +74,10 @@ const collectHistoryStepData = (entry) => {
   if (entry.status === 'failed') {
     const hasExplicitFailure = Object.values(statusMap).some((s) => s === 'failed')
     if (!hasExplicitFailure) {
-      // Find the last FLOW_STEPS key that started (running / queued / success)
+      // Find the last flow key that started (running / queued / success)
       // but isn't success — mark it failed.
       let lastStartedKey = null
-      for (const step of FLOW_STEPS) {
+      for (const step of flowSteps) {
         if (statusMap[step.key] && statusMap[step.key] !== 'idle') {
           lastStartedKey = step.key
         }
@@ -72,7 +90,7 @@ const collectHistoryStepData = (entry) => {
 
   if (entry.status === 'cancelled') {
     let lastStartedKey = null
-    for (const step of FLOW_STEPS) {
+    for (const step of flowSteps) {
       if (statusMap[step.key] && statusMap[step.key] !== 'idle') {
         lastStartedKey = step.key
       }
@@ -91,7 +109,7 @@ const collectHistoryStepData = (entry) => {
 }
 
 // Legacy helper kept for computeFlowProgress callers.
-const collectHistoryStepStatus = (entry) => collectHistoryStepData(entry).statusMap
+const collectHistoryStepStatus = (entry, flowSteps) => collectHistoryStepData(entry, flowSteps).statusMap
 
 /**
  * Collapses the raw progress event stream into one row per step (last-wins),
@@ -149,16 +167,18 @@ export function buildLogRows(entry) {
 }
 
 export const computeFlowProgress = (entry) => {
-  const statuses = collectHistoryStepStatus(entry)
-  const done = FLOW_STEPS.filter((step) => {
+  const flowSteps = resolveFlowSteps(entry)
+  const statuses = collectHistoryStepStatus(entry, flowSteps)
+  const done = flowSteps.filter((step) => {
     const status = statuses[step.key]
     return status === 'success' || status === 'skipped'
   }).length
-  return { done, total: FLOW_STEPS.length }
+  return { done, total: flowSteps.length }
 }
 
 export default function JobFlowSteps({ entry, idPrefix = 'flow', onFailedStepClick }) {
-  const { statusMap } = collectHistoryStepData(entry)
+  const flowSteps = resolveFlowSteps(entry)
+  const { statusMap } = collectHistoryStepData(entry, flowSteps)
 
   const handleStepClick = (step, status) => {
     if (status !== 'failed') return
@@ -167,7 +187,7 @@ export default function JobFlowSteps({ entry, idPrefix = 'flow', onFailedStepCli
 
   return (
     <div className="history-step-diagram" aria-label="Job flow steps">
-      {FLOW_STEPS.map((step) => {
+      {flowSteps.map((step) => {
         const status = statusMap[step.key] || 'idle'
         const isFailed = status === 'failed'
         return (

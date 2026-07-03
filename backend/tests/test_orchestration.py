@@ -10,6 +10,7 @@ from app.orchestration import (
     _build_usage_from_session_logs,
     _count_commits_ahead,
     _extract_copilot_session_id,
+    _extract_pr_review_findings,
     _prepare_env,
     _run_copilot_prompt,
     run_orchestration,
@@ -156,6 +157,111 @@ def test_extract_copilot_session_id_from_resume_text():
     """
 
     assert _extract_copilot_session_id(output) == "e4380250-504d-4eee-b990-836b2998fddb"
+
+
+def test_extract_pr_review_findings_parses_structured_payload():
+    output = """
+    Review output
+    FINDINGS_JSON_START
+    [
+      {
+        "path": "backend/app/orchestration.py",
+        "line": 120,
+        "severity": "major",
+        "title": "Missing guard",
+        "details": "Input is not validated.",
+        "suggestion": "Add explicit validation"
+      }
+    ]
+    FINDINGS_JSON_END
+    """
+
+    findings = _extract_pr_review_findings(output)
+
+    assert len(findings) == 1
+    assert findings[0]["path"] == "backend/app/orchestration.py"
+    assert findings[0]["line"] == 120
+    assert findings[0]["severity"] == "MAJOR"
+    assert "Missing guard" in findings[0]["body"]
+
+
+def test_run_orchestration_pr_review_flow_posts_comments_and_artifacts(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    monkeypatch.setattr("app.orchestration._REPO_BASE_DIR", repo_base)
+    monkeypatch.setattr(
+        "app.orchestration._prepare_env",
+        lambda: {"GITHUB_TOKEN": "github-token", "COPILOT_GITHUB_TOKEN": "copilot-token"},
+    )
+    monkeypatch.setattr(
+        "app.orchestration._normalize_repo",
+        lambda repository: ("https://github.com/owner/repo.git", "owner/repo"),
+    )
+
+    review_output = """
+    ## Findings
+    FINDINGS_JSON_START
+    [
+      {
+        "path": "backend/app/main.py",
+        "line": 25,
+        "severity": "CRITICAL",
+        "title": "Security issue",
+        "details": "Token is logged",
+        "suggestion": "Remove sensitive logging"
+      }
+    ]
+    FINDINGS_JSON_END
+    """
+    monkeypatch.setattr("app.orchestration._run_copilot_prompt", lambda *args, **kwargs: review_output)
+
+    posted_comments = []
+
+    def fake_run(cmd, cwd, env, cancellation_token=None):
+        if "clone" in cmd:
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+            return ""
+        if cmd[:3] == ["gh", "pr", "checkout"]:
+            review_dir = Path(cwd) / ".github" / "pr_review"
+            review_dir.mkdir(parents=True, exist_ok=True)
+            (review_dir / "feature-pr-42 Code Review.md").write_text("# Findings\n- test", encoding="utf-8")
+            return ""
+        return ""
+
+    def fake_get(url, headers, timeout):
+        assert url.endswith("/repos/owner/repo/pulls/42")
+        return SimpleNamespace(status_code=200, json=lambda: {"head": {"sha": "abc123"}}, text="")
+
+    def fake_post(url, headers, json, timeout):
+        posted_comments.append({"url": url, "body": json["body"], "path": json["path"], "line": json["line"]})
+        return SimpleNamespace(status_code=201, text="")
+
+    monkeypatch.setattr("app.orchestration._run", fake_run)
+    monkeypatch.setattr("app.orchestration.requests.get", fake_get)
+    monkeypatch.setattr("app.orchestration.requests.post", fake_post)
+
+    result = run_orchestration(
+        jira_ticket_id="PR-42",
+        repository="owner/repo",
+        base_branch="main",
+        reviewer=None,
+        selected_agent="PR-Review",
+        selected_model=None,
+        commit_message="chore: review",
+        change_plan=["Review PR #42"],
+        jira_context={"summary": "Review PR #42", "description": "https://github.com/owner/repo/pull/42"},
+    )
+
+    assert result["selected_agent"] == "PR-Review"
+    assert result["pull_request_url"] == "https://github.com/owner/repo/pull/42"
+    assert any(step["name"] == "checkout_pull_request" for step in result["steps"])
+    assert any(step["name"] == "publish_review_comments" for step in result["steps"])
+    assert len(result["artifacts"]) == 3
+    assert result["artifacts"][0]["path"] == ".github/pr_review/feature-pr-42 Code Review.md"
+    assert any(artifact["path"] == ".github/pr_review/feature-pr-42 Code Review.md" for artifact in result["artifacts"])
+    assert result["review_comment_summary"]["posted"] == 1
+    assert posted_comments[0]["path"] == "backend/app/main.py"
+    assert posted_comments[0]["line"] == 25
 
 
 def test_build_usage_from_session_logs_uses_shutdown_event(monkeypatch, tmp_path):
