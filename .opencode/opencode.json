@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "project": "agentic-orchestrator",
+  "systemPromptFile": "../AGENTS.md",
+  "agentsDir": "./agents",
+  "skillsDir": "./skills"
+}
