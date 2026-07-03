@@ -294,6 +294,10 @@ def _allowed_actions(job_status: str, control_snapshot: dict | None) -> list[str
     if _is_terminal_status(job_status):
         return []
 
+    if job_status in {"paused", "blocked_approval"} and not control_snapshot:
+        # Avoid advertising interactive controls after in-memory controls are cleaned up.
+        return []
+
     snapshot = control_snapshot or {}
     if snapshot.get("approval_pending"):
         return ["approve", "reject", "cancel"]
