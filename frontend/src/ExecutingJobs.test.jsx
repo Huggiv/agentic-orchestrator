@@ -67,7 +67,7 @@ describe('ExecutingJobs controls', () => {
     expect(await screen.findByText(/approval required/i)).toBeInTheDocument()
   })
 
-  it('hides interactive controls when allowed_actions is missing or empty', async () => {
+  it('falls back to approval controls when blocked at create_pr and allowed_actions is missing', async () => {
     fetch.mockImplementation(async (url) => {
       if (String(url).includes('/api/orchestrate/job-3')) {
         return makeResponse({
@@ -91,9 +91,9 @@ describe('ExecutingJobs controls', () => {
     expect(await screen.findByText(/approval required/i)).toBeInTheDocument()
     expect(within(container).queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument()
     expect(within(container).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument()
-    expect(within(container).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
-    expect(within(container).queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
-    expect(within(container).queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+    expect(await within(container).findByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(within(container).getByRole('button', { name: 'Reject' })).toBeInTheDocument()
+    expect(within(container).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
   })
 
   it('shows artifact view/download actions and calls handlers', async () => {
@@ -174,7 +174,7 @@ describe('ExecutingJobs controls', () => {
     expect(onArtifactDownload).not.toHaveBeenCalled()
   })
 
-  it('removes stale action buttons when backend no longer advertises actions', async () => {
+  it('removes approval action buttons when backend exits approval-blocked state', async () => {
     let firstPoll = true
     fetch.mockImplementation(async (url) => {
       if (String(url).includes('/api/orchestrate/job-4')) {
@@ -191,10 +191,10 @@ describe('ExecutingJobs controls', () => {
           })
         }
         return makeResponse({
-          status: 'blocked_approval',
+          status: 'running',
           progress: [],
-          current_step: 'create_pr',
-          next_step: null,
+          current_step: 'push_branch',
+          next_step: 'create_pr',
           result: null,
           error: null,
         })

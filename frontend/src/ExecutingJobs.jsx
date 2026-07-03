@@ -28,6 +28,20 @@ const resolveJobArtifacts = (details) => {
   return []
 }
 
+const APPROVAL_CHECKPOINTS = new Set(['create_pr', 'publish_review_comments'])
+
+const resolveAllowedActions = (details) => {
+  const serverActions = Array.isArray(details?.allowed_actions) ? details.allowed_actions : []
+  if (serverActions.length > 0) return serverActions
+
+  const currentStep = String(details?.current_step || '').trim()
+  if (details?.status === 'blocked_approval' && APPROVAL_CHECKPOINTS.has(currentStep)) {
+    return ['approve', 'reject', 'cancel']
+  }
+
+  return []
+}
+
 export default function ExecutingJobs({
   runningJobs = [],
   onJobComplete,
@@ -180,7 +194,7 @@ export default function ExecutingJobs({
         const details = jobDetails[job.id] || { status: 'queued', progress: [] }
         const progress = details.progress || []
         const artifacts = resolveJobArtifacts(details)
-        const allowedActions = Array.isArray(details.allowed_actions) ? details.allowed_actions : []
+        const allowedActions = resolveAllowedActions(details)
         const pendingAction = actionState[job.id]
 
         return (
