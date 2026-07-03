@@ -2062,9 +2062,8 @@ button:hover {
   overflow-y: auto;
 }
 
-.bulk-model-refresh-row {
-  display: flex;
-  justify-content: flex-end;
+.pr-review-form-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .bulk-run-card {
@@ -2088,9 +2087,19 @@ button:hover {
 }
 
 .pr-review-actions-row {
-  display: flex;
+  display: grid;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.45rem;
+}
+
+.pr-review-load-btn {
+  width: 100%;
+  justify-self: stretch;
+  min-height: 2.5rem;
+}
+
+.pr-review-run-btn {
+  min-height: 2.5rem;
 }
 
 .jira-results-table {
@@ -2571,6 +2580,20 @@ button:hover {
   .chat-composer-actions {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .trigger-form-grid,
+  .pr-review-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pr-review-actions-row {
+    order: 99;
+  }
+
+  .pr-review-load-btn,
+  .pr-review-run-btn {
+    width: 100%;
   }
 
   .chat-confirm-actions {

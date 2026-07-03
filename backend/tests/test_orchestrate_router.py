@@ -486,7 +486,7 @@ def test_pr_review_pulls_returns_sorted_pull_requests(monkeypatch):
     payload = [
         {
             "number": 14,
-            "title": "Fix telemetry parser",
+            "title": "AGENT_FLOW-777 Fix telemetry parser",
             "html_url": "https://github.com/owner/repo/pull/14",
             "head": {"ref": "feature/fix-telemetry"},
             "base": {"ref": "development"},
@@ -517,6 +517,7 @@ def test_pr_review_pulls_returns_sorted_pull_requests(monkeypatch):
     assert body["repository"] == "owner/repo"
     assert [item["number"] for item in body["pulls"]] == [25, 14]
     assert body["pulls"][0]["label"].startswith("#25 -")
+    assert body["pulls"][1]["jira_ticket_id"] == "AGENT_FLOW-777"
 
 
 def test_pr_review_pulls_rejects_invalid_repository_format():

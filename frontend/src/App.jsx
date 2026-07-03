@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import ExecutingJobs from './ExecutingJobs'
@@ -159,9 +159,10 @@ export default function App() {
   const [history, setHistory] = useState([])
   const [runningJobs, setRunningJobs] = useState([])
   const [activeTab, setActiveTab] = useState('run')
-  const [expandedPanels, setExpandedPanels] = useState({ trigger: true })
+  const [expandedPanels, setExpandedPanels] = useState({ trigger: true, 'jira-search': false, 'pr-review': false })
   const [selectedArtifact, setSelectedArtifact] = useState(null)
   const [historySearchFilter, setHistorySearchFilter] = useState('')
+  const lastModelAutoRefreshRef = useRef(0)
   // openRawLogs: Set of entry IDs whose "Raw Logs" panel is force-opened
   // highlightedSteps: { [entryId]: stepKey } — step that triggered the expand
   const [openRawLogs, setOpenRawLogs] = useState(new Set())
@@ -227,6 +228,14 @@ export default function App() {
     } finally {
       setModelsLoading(false)
     }
+  }
+
+  const autoRefreshModels = () => {
+    const now = Date.now()
+    if (modelsLoading) return
+    if (now - lastModelAutoRefreshRef.current < 30000) return
+    lastModelAutoRefreshRef.current = now
+    loadModels({ force: true }).catch(() => undefined)
   }
 
   useEffect(() => {
@@ -438,6 +447,7 @@ export default function App() {
       setPrReviewError('Selected PR details are unavailable. Validate repository again.')
       return
     }
+    const resolvedTicketId = (selectedPr.jira_ticket_id || '').trim() || `PR-${selectedPr.number}`
 
     setPrReviewError('')
     setPrReviewSubmitting(true)
@@ -446,7 +456,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          jira_ticket_id: `PR-${selectedPr.number}`,
+          jira_ticket_id: resolvedTicketId,
           selected_agent: 'PR-Review',
           selected_model: prReviewSelectedModel || null,
           repository,
@@ -459,9 +469,9 @@ export default function App() {
             'Document actionable review findings',
           ],
           jira_context: {
-            key: `PR-${selectedPr.number}`,
-            summary: `PR Review: #${selectedPr.number} ${selectedPr.title}`,
-            description: `Review URL: ${selectedPr.url || '-'}\nRepository: ${repository}\nAuthor: ${selectedPr.author || '-'}\nBase: ${selectedPr.base_ref || '-'}\nHead: ${selectedPr.head_ref || '-'}`,
+            key: resolvedTicketId,
+            summary: `${resolvedTicketId} PR Review: #${selectedPr.number} ${selectedPr.title}`,
+            description: `Jira Ticket: ${resolvedTicketId}\nReview URL: ${selectedPr.url || '-'}\nRepository: ${repository}\nAuthor: ${selectedPr.author || '-'}\nBase: ${selectedPr.base_ref || '-'}\nHead: ${selectedPr.head_ref || '-'}`,
             type: 'Pull Request Review',
             status: 'Open',
             priority: 'Normal',
@@ -478,7 +488,7 @@ export default function App() {
         const byId = new Map(prev.map((item) => [item.id, item]))
         byId.set(data.job_id, {
           id: data.job_id,
-          jira_ticket_id: `PR-${selectedPr.number}`,
+          jira_ticket_id: resolvedTicketId,
           repository,
           selected_agent: 'PR-Review',
           selected_model: prReviewSelectedModel || null,
@@ -889,24 +899,12 @@ export default function App() {
 
                 <label>
                   Model
-                  <div className="model-select-row">
-                    <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-                      <option value=''>Auto</option>
-                      {availableModels.map((model) => (
-                        <option key={model.id} value={model.id}>{model.name}</option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="secondary-button icon-refresh-button"
-                      onClick={() => loadModels({ force: true })}
-                      disabled={modelsLoading}
-                      title="Refresh available models from backend"
-                      aria-label="Refresh available models"
-                    >
-                      <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
-                    </button>
-                  </div>
+                  <select value={selectedModel} onFocus={autoRefreshModels} onChange={(e) => setSelectedModel(e.target.value)}>
+                    <option value=''>Auto</option>
+                    {availableModels.map((model) => (
+                      <option key={model.id} value={model.id}>{model.name}</option>
+                    ))}
+                  </select>
                 </label>
 
                 <label>
@@ -1006,15 +1004,22 @@ export default function App() {
               expandedPanels={expandedPanels}
               togglePanel={togglePanel}
             >
-              <form onSubmit={runPrReviewWorkflow} className="form-grid trigger-form-grid">
+              <form onSubmit={runPrReviewWorkflow} className="form-grid trigger-form-grid pr-review-form-grid">
                 <label>
                   Repository (owner/repo or URL)
                   <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
                 </label>
 
                 <div className="pr-review-actions-row">
-                  <button type="button" onClick={validateRepoAndLoadPulls} disabled={prReviewLoading || !canRun}>
-                    {prReviewLoading ? 'Validating...' : 'Validate Repo and Load PRs'}
+                  <button
+                    type="button"
+                    className="pr-review-load-btn"
+                    onClick={validateRepoAndLoadPulls}
+                    disabled={prReviewLoading || !canRun}
+                    title="Validate repository and load pull requests"
+                    aria-label="Load pull requests"
+                  >
+                    {prReviewLoading ? '⏳ Loading PRs...' : '🔎 Load PRs'}
                   </button>
                 </div>
 
@@ -1030,24 +1035,12 @@ export default function App() {
 
                 <label>
                   Model
-                  <div className="model-select-row">
-                    <select value={prReviewSelectedModel} onChange={(e) => setPrReviewSelectedModel(e.target.value)}>
-                      <option value=''>Auto</option>
-                      {availableModels.map((model) => (
-                        <option key={model.id} value={model.id}>{model.name}</option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="secondary-button icon-refresh-button"
-                      onClick={() => loadModels({ force: true })}
-                      disabled={modelsLoading}
-                      title="Refresh available models"
-                      aria-label="Refresh available models for PR review"
-                    >
-                      <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
-                    </button>
-                  </div>
+                  <select value={prReviewSelectedModel} onFocus={autoRefreshModels} onChange={(e) => setPrReviewSelectedModel(e.target.value)}>
+                    <option value=''>Auto</option>
+                    {availableModels.map((model) => (
+                      <option key={model.id} value={model.id}>{model.name}</option>
+                    ))}
+                  </select>
                 </label>
 
                 <label>
@@ -1055,7 +1048,7 @@ export default function App() {
                   <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="teammate-name" />
                 </label>
 
-                <button type="submit" disabled={prReviewSubmitting || !selectedPrNumber || !canRun}>
+                <button type="submit" className="pr-review-run-btn" disabled={prReviewSubmitting || !selectedPrNumber || !canRun}>
                   {prReviewSubmitting ? 'Starting...' : 'Run PR Review Workflow'}
                 </button>
                 {!canRun && (
@@ -1144,8 +1137,7 @@ export default function App() {
               setSelectedModel={setSelectedModel}
               availableAgents={availableAgents}
               availableModels={availableModels}
-              modelsLoading={modelsLoading}
-              onRefreshModels={() => loadModels({ force: true })}
+              onModelDropdownFocus={autoRefreshModels}
               onJobsQueued={handleChatQueuedJobs}
             />
           ) : (
@@ -1417,18 +1409,6 @@ export default function App() {
               <button type="button" onClick={() => setBulkPopupOpen(false)}>Close</button>
             </div>
             <div className="bulk-run-body">
-              <div className="bulk-model-refresh-row">
-                <button
-                  type="button"
-                  className="secondary-button icon-refresh-button"
-                  onClick={() => loadModels({ force: true })}
-                  disabled={modelsLoading}
-                  title="Refresh available models for all selected tickets"
-                  aria-label="Refresh models for bulk trigger"
-                >
-                  <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
-                </button>
-              </div>
               {bulkTicketConfigs.map((item) => (
                 <div key={item.ticketId} className="bulk-run-card">
                   <h4>{item.ticketId}</h4>
@@ -1444,7 +1424,7 @@ export default function App() {
 
                     <label>
                       Model
-                      <select value={item.selectedModel} onChange={(e) => updateBulkTicketConfig(item.ticketId, 'selectedModel', e.target.value)}>
+                      <select value={item.selectedModel} onFocus={autoRefreshModels} onChange={(e) => updateBulkTicketConfig(item.ticketId, 'selectedModel', e.target.value)}>
                         <option value=''>Auto</option>
                         {availableModels.map((model) => (
                           <option key={model.id} value={model.id}>{model.name}</option>

@@ -95,8 +95,7 @@ export default function ChatConsole({
   setSelectedModel,
   availableAgents,
   availableModels,
-  modelsLoading,
-  onRefreshModels,
+  onModelDropdownFocus,
   onJobsQueued,
 }) {
   const [sessions, setSessions] = useState([])
@@ -618,7 +617,7 @@ export default function ChatConsole({
                     </label>
                     <label className="chat-composer-control" title="Selected model">
                       <span className="chat-control-icon" aria-hidden="true">🧠</span>
-                      <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+                      <select value={selectedModel} onFocus={() => onModelDropdownFocus?.()} onChange={(e) => setSelectedModel(e.target.value)}>
                         <option value="">Auto</option>
                         {availableModels.map((model) => (
                           <option key={model.id} value={model.id}>{model.name}</option>
@@ -627,16 +626,6 @@ export default function ChatConsole({
                     </label>
                   </div>
                   <div className="chat-composer-actions">
-                    <button
-                      type="button"
-                      className="chat-model-refresh icon-refresh-button"
-                      onClick={onRefreshModels}
-                      disabled={modelsLoading}
-                      title="Refresh chat model list"
-                      aria-label="Refresh chat model list"
-                    >
-                      <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
-                    </button>
                     <button type="submit" disabled={!canSend} title="Send message" aria-label="Send message">
                       <span aria-hidden="true">➤</span>
                     </button>

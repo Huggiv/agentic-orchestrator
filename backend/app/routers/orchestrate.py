@@ -59,6 +59,7 @@ _STEP_ORDER = [
 ]
 
 _RETRYABLE_STEP_SET = set(_STEP_ORDER)
+_JIRA_TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]+-\d+\b")
 
 
 def _normalize_step_name(name: str | None) -> str:
@@ -66,6 +67,14 @@ def _normalize_step_name(name: str | None) -> str:
     if not value:
         return "unknown"
     return _STEP_ALIASES.get(value, value)
+
+
+def _extract_jira_ticket_from_text(text: str | None) -> str | None:
+    value = str(text or "").upper()
+    match = _JIRA_TICKET_PATTERN.search(value)
+    if not match:
+        return None
+    return match.group(0)
 
 
 def _normalize_step_state(status: str | None) -> str:
@@ -766,6 +775,7 @@ def list_repo_pull_requests(repository: str = Query(min_length=3), _user: dict =
                 "number": number,
                 "title": title,
                 "label": f"#{number} - {title}",
+                "jira_ticket_id": _extract_jira_ticket_from_text(title),
                 "url": str(item.get("html_url") or ""),
                 "head_ref": str((item.get("head") or {}).get("ref") or ""),
                 "base_ref": str((item.get("base") or {}).get("ref") or ""),

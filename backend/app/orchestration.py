@@ -313,6 +313,15 @@ def _extract_dod_points(description: str) -> list[str]:
     return points
 
 
+def _compact_sentence(value: str, fallback: str, max_len: int = 90) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        text = fallback
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3].rstrip() + "..."
+
+
 def _extract_pr_number(jira_ticket_id: str, issue: dict[str, Any], change_plan: list[str]) -> int | None:
     candidates: list[str] = [
         str(jira_ticket_id or ""),
@@ -640,7 +649,8 @@ def _run_pr_review_orchestration(
     _emit_progress(progress_callback, "publish_review_comments", "success", publish_details)
     steps.append(StepResult(name="publish_review_comments", status="success", details=publish_details))
 
-    usage = _build_usage_from_session_logs(copilot_session_ids)
+    changes_summary = _collect_change_stats(repo_path, env, cancellation_token=cancellation_token)
+    usage = _build_usage_from_session_logs(copilot_session_ids, changes_override=changes_summary)
     return {
         "branch_name": f"pr-{pr_number}",
         "pull_request_url": f"https://github.com/{repo_slug}/pull/{pr_number}",
@@ -1442,8 +1452,27 @@ def run_orchestration(
             _emit_progress(progress_callback, "create_pr", "running")
             if cancellation_token:
                 cancellation_token.throw_if_cancelled()
-            pr_title = f"{jira_ticket_id}: {commit_message}"
-            pr_body = "Automated agentic flow execution via backend orchestration."
+            feature_name = _compact_sentence(
+                summary,
+                fallback=commit_message.split(":", 1)[-1].strip() or "Automated implementation",
+                max_len=90,
+            )
+            pr_title = f"{jira_ticket_id}: {feature_name}"
+
+            pr_body_lines = [
+                f"Implements {jira_ticket_id} on `{branch_name}` targeting `{base_branch}`.",
+                "",
+                "Implemented changes:",
+            ]
+            for item in effective_plan[:5]:
+                pr_body_lines.append(f"- {item}")
+            if dod_points:
+                pr_body_lines.append("")
+                pr_body_lines.append("Definition of Done checkpoints:")
+                for point in dod_points[:5]:
+                    pr_body_lines.append(f"- {point}")
+
+            pr_body = "\n".join(pr_body_lines)
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
