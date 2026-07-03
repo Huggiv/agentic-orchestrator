@@ -21,6 +21,10 @@ const OPTIONAL_EXECUTION_STEPS = [
   { key: 'create_pr', label: 'Create PR' },
 ]
 
+const PR_REVIEW_OPTIONAL_EXECUTION_STEPS = [
+  { key: 'publish_review_comments', label: 'Publish Review Comments' },
+]
+
 const JOB_STATUS_LABELS = {
   idle: 'Ready',
   queued: 'Queued',
@@ -161,6 +165,7 @@ export default function App() {
   const [prReviewError, setPrReviewError] = useState('')
   const [selectedPrNumber, setSelectedPrNumber] = useState('')
   const [prReviewSelectedModel, setPrReviewSelectedModel] = useState('')
+  const [selectedPrReviewExecutionSteps, setSelectedPrReviewExecutionSteps] = useState(['publish_review_comments'])
   const [prReviewSubmitting, setPrReviewSubmitting] = useState(false)
   const [history, setHistory] = useState([])
   const [runningJobs, setRunningJobs] = useState([])
@@ -470,6 +475,7 @@ export default function App() {
           base_branch: selectedPr.base_ref || 'development',
           reviewer: reviewer || null,
           commit_message: `chore(pr-review-${selectedPr.number}): review pull request #${selectedPr.number}`,
+          execution_steps: selectedPrReviewExecutionSteps,
           change_plan: [
             `Review pull request #${selectedPr.number}: ${selectedPr.title}`,
             'Evaluate correctness, risks, and missing tests',
@@ -763,6 +769,18 @@ export default function App() {
         }
       }
 
+      return Array.from(next)
+    })
+  }
+
+  const togglePrReviewExecutionStep = (stepKey) => {
+    setSelectedPrReviewExecutionSteps((prev) => {
+      const next = new Set(prev)
+      if (next.has(stepKey)) {
+        next.delete(stepKey)
+      } else {
+        next.add(stepKey)
+      }
       return Array.from(next)
     })
   }
@@ -1141,6 +1159,27 @@ export default function App() {
                 <label>
                   Reviewer (GitHub username)
                   <input value={reviewer} onChange={(e) => setReviewer(e.target.value)} placeholder="teammate-name" />
+                </label>
+
+                <label className="flow-step-selector-field">
+                  Job Flow Steps
+                  <details className="flow-step-selector">
+                    <summary>
+                      {selectedPrReviewExecutionSteps.length}/{PR_REVIEW_OPTIONAL_EXECUTION_STEPS.length} optional steps selected
+                    </summary>
+                    <div className="flow-step-selector-list">
+                      {PR_REVIEW_OPTIONAL_EXECUTION_STEPS.map((step) => (
+                        <label key={step.key} className="flow-step-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={selectedPrReviewExecutionSteps.includes(step.key)}
+                            onChange={() => togglePrReviewExecutionStep(step.key)}
+                          />
+                          <span>{step.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
                 </label>
 
                 <button type="submit" className="pr-review-run-btn" disabled={prReviewSubmitting || !selectedPrNumber || !canRun}>

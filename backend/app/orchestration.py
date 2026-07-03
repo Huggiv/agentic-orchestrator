@@ -557,9 +557,23 @@ def _run_pr_review_orchestration(
     copilot_notes: list[str],
     copilot_session_ids: list[str],
     repo_instructions: list[dict[str, str]],
+    execution_steps: list[str] | None,
     progress_callback: Callable[[dict], None] | None,
     cancellation_token: CancellationToken | None,
 ) -> dict[str, Any]:
+    enabled_optional_steps = {"publish_review_comments"}
+    if isinstance(execution_steps, list):
+        normalized_requested = {
+            _normalize_step_name(step)
+            for step in execution_steps
+            if isinstance(step, str) and step.strip()
+        }
+        enabled_optional_steps = {
+            step_name
+            for step_name in normalized_requested
+            if step_name == "publish_review_comments"
+        }
+
     pr_number = _extract_pr_number(jira_ticket_id, issue, change_plan)
     if pr_number is None:
         raise OrchestrationError("Unable to determine pull request number for PR-Review workflow")
@@ -642,20 +656,25 @@ def _run_pr_review_orchestration(
     )
     steps.append(StepResult(name="view_artifacts", status="success", details=f"{len(artifacts)} artifact(s)"))
 
-    _emit_progress(progress_callback, "publish_review_comments", "running", f"{len(findings)} finding(s)")
-    publish_summary = _publish_pr_inline_comments(
-        repo_slug=repo_slug,
-        pr_number=pr_number,
-        findings=findings,
-        token=token,
-    )
-    if publish_summary["failed"] > 0:
-        raise OrchestrationError(
-            f"Failed to publish {publish_summary['failed']} inline review comment(s) for PR #{pr_number}"
+    if "publish_review_comments" in enabled_optional_steps:
+        _emit_progress(progress_callback, "publish_review_comments", "running", f"{len(findings)} finding(s)")
+        publish_summary = _publish_pr_inline_comments(
+            repo_slug=repo_slug,
+            pr_number=pr_number,
+            findings=findings,
+            token=token,
         )
-    publish_details = f"Posted {publish_summary['posted']} inline comment(s); {publish_summary['failed']} failed"
-    _emit_progress(progress_callback, "publish_review_comments", "success", publish_details)
-    steps.append(StepResult(name="publish_review_comments", status="success", details=publish_details))
+        if publish_summary["failed"] > 0:
+            raise OrchestrationError(
+                f"Failed to publish {publish_summary['failed']} inline review comment(s) for PR #{pr_number}"
+            )
+        publish_details = f"Posted {publish_summary['posted']} inline comment(s); {publish_summary['failed']} failed"
+        _emit_progress(progress_callback, "publish_review_comments", "success", publish_details)
+        steps.append(StepResult(name="publish_review_comments", status="success", details=publish_details))
+    else:
+        publish_summary = {"posted": 0, "failed": 0, "skipped": True}
+        _emit_progress(progress_callback, "publish_review_comments", "skipped", "Skipped by execution step selection")
+        steps.append(StepResult(name="publish_review_comments", status="skipped", details="Skipped by execution step selection"))
 
     changes_summary = _collect_change_stats(repo_path, env, cancellation_token=cancellation_token)
     usage = _build_usage_from_session_logs(copilot_session_ids, changes_override=changes_summary)
@@ -1177,6 +1196,7 @@ def run_orchestration(
             copilot_notes=copilot_notes,
             copilot_session_ids=copilot_session_ids,
             repo_instructions=repo_instructions,
+            execution_steps=execution_steps,
             progress_callback=progress_callback,
             cancellation_token=cancellation_token,
         )

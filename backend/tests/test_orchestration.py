@@ -264,6 +264,63 @@ def test_run_orchestration_pr_review_flow_posts_comments_and_artifacts(monkeypat
     assert posted_comments[0]["line"] == 25
 
 
+def test_run_orchestration_pr_review_can_skip_publish_comments(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    monkeypatch.setattr("app.orchestration._REPO_BASE_DIR", repo_base)
+    monkeypatch.setattr(
+        "app.orchestration._prepare_env",
+        lambda: {"GITHUB_TOKEN": "github-token", "COPILOT_GITHUB_TOKEN": "copilot-token"},
+    )
+    monkeypatch.setattr("app.orchestration._collect_change_stats", lambda *args, **kwargs: {"added": 0, "removed": 0})
+    monkeypatch.setattr("app.orchestration._build_usage_from_session_logs", lambda *args, **kwargs: {"changes": {"added": 0, "removed": 0}})
+
+    review_output = """
+    FINDINGS_JSON_START
+    [
+      {
+        "path": "backend/app/main.py",
+        "line": 25,
+        "severity": "MAJOR",
+        "title": "Issue",
+        "details": "details",
+        "suggestion": "fix"
+      }
+    ]
+    FINDINGS_JSON_END
+    """
+    monkeypatch.setattr("app.orchestration._run_copilot_prompt", lambda *args, **kwargs: review_output)
+
+    def fake_run(cmd, cwd, env, cancellation_token=None):
+        if "clone" in cmd:
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+            return ""
+        return ""
+
+    monkeypatch.setattr("app.orchestration._run", fake_run)
+    monkeypatch.setattr(
+        "app.orchestration._publish_pr_inline_comments",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("publish should be skipped")),
+    )
+
+    result = run_orchestration(
+        jira_ticket_id="PR-42",
+        repository="owner/repo",
+        base_branch="main",
+        reviewer=None,
+        selected_agent="PR-Review",
+        selected_model=None,
+        commit_message="chore: review",
+        change_plan=["Review PR #42"],
+        execution_steps=[],
+        jira_context={"summary": "Review PR #42", "description": "https://github.com/owner/repo/pull/42"},
+    )
+
+    step_status = {step["name"]: step["status"] for step in result["steps"]}
+    assert step_status["publish_review_comments"] == "skipped"
+    assert result["review_comment_summary"]["skipped"] is True
+
+
 def test_build_usage_from_session_logs_uses_shutdown_event(monkeypatch, tmp_path):
     session_id = "ca2f0a7b-69ab-4945-a4bc-45dd4aaa26d7"
     session_dir = tmp_path / session_id

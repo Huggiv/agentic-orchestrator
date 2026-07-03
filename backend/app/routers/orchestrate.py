@@ -643,12 +643,13 @@ def _run_job(job_id: str, payload: OrchestrateRequest, retry_context: dict | Non
             "selected_model": payload.selected_model,
             "commit_message": payload.commit_message,
             "change_plan": payload.change_plan,
-            "execution_steps": payload.execution_steps,
             "jira_context": payload.jira_context,
             "progress_callback": progress_callback,
             "cancellation_token": cancel_token,
             "run_id": f"agent_flow-agentic-{job_id[:8]}",
         }
+        if payload.execution_steps is not None:
+            run_kwargs["execution_steps"] = payload.execution_steps
         if retry_context:
             run_kwargs["retry_context"] = retry_context
         result = run_orchestration(**run_kwargs)
