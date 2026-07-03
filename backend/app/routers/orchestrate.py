@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from typing import Any, Literal, Optional
+from urllib.parse import quote
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
+import requests
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -512,6 +514,32 @@ def _fetch_jira_details(jira_ticket_id: str) -> dict:
     }
 
 
+def _normalize_repository_slug(repository: str) -> str:
+    value = str(repository or "").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="Repository is required")
+
+    if value.startswith("https://github.com/"):
+        value = value.split("github.com/", 1)[1]
+    if value.endswith(".git"):
+        value = value[:-4]
+    value = value.strip("/")
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", value):
+        raise HTTPException(status_code=422, detail="Repository must be in owner/repo format or GitHub URL")
+    return value
+
+
+def _github_api_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "agent-flow-orchestrator",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("COPILOT_GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _run_job(job_id: str, payload: OrchestrateRequest, retry_context: dict | None = None) -> None:
     with _JOB_CANCEL_LOCK:
         cancel_token = _JOB_CANCEL_TOKENS.get(job_id)
@@ -697,6 +725,53 @@ def enqueue_orchestration(
 @router.post("/orchestrate")
 def orchestrate(payload: OrchestrateRequest, _user: dict = Depends(require_run_permission)):
     return enqueue_orchestration(payload)
+
+
+@router.get("/orchestrate/pr-review/pulls")
+def list_repo_pull_requests(repository: str = Query(min_length=3), _user: dict = Depends(require_run_permission)):
+    slug = _normalize_repository_slug(repository)
+    url = f"https://api.github.com/repos/{quote(slug, safe='/')}/pulls"
+    params = {"state": "open", "per_page": 100, "sort": "updated", "direction": "desc"}
+
+    try:
+        response = requests.get(url, headers=_github_api_headers(), params=params, timeout=20)
+    except requests.RequestException as exc:  # pragma: no cover - network errors depend on runtime
+        raise HTTPException(status_code=502, detail=f"Unable to reach GitHub API: {exc}") from exc
+
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Repository not found or inaccessible")
+    if response.status_code in {401, 403}:
+        raise HTTPException(status_code=response.status_code, detail="GitHub API authorization failed")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"GitHub API error ({response.status_code})")
+
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=502, detail="Unexpected response from GitHub API")
+
+    pulls: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("number")
+        if not isinstance(number, int):
+            continue
+        title = str(item.get("title") or "").strip() or f"PR #{number}"
+        pulls.append(
+            {
+                "number": number,
+                "title": title,
+                "label": f"#{number} - {title}",
+                "url": str(item.get("html_url") or ""),
+                "head_ref": str((item.get("head") or {}).get("ref") or ""),
+                "base_ref": str((item.get("base") or {}).get("ref") or ""),
+                "author": str((item.get("user") or {}).get("login") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+        )
+
+    pulls.sort(key=lambda pr: pr["number"], reverse=True)
+    return {"repository": slug, "pulls": pulls}
 
 
 @router.post("/orchestrate/{job_id}/retry")

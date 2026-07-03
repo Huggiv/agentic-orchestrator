@@ -150,6 +150,11 @@ export default function App() {
   const [bulkPopupOpen, setBulkPopupOpen] = useState(false)
   const [bulkTicketConfigs, setBulkTicketConfigs] = useState([])
   const [bulkSubmitting, setBulkSubmitting] = useState(false)
+  const [prReviewPulls, setPrReviewPulls] = useState([])
+  const [prReviewLoading, setPrReviewLoading] = useState(false)
+  const [prReviewError, setPrReviewError] = useState('')
+  const [selectedPrNumber, setSelectedPrNumber] = useState('')
+  const [prReviewSubmitting, setPrReviewSubmitting] = useState(false)
   const [history, setHistory] = useState([])
   const [runningJobs, setRunningJobs] = useState([])
   const [activeTab, setActiveTab] = useState('run')
@@ -373,6 +378,97 @@ export default function App() {
     })
     loadHistory().catch(() => undefined)
     setActiveTab('executing')
+  }
+
+  const validateRepoAndLoadPulls = async () => {
+    setPrReviewError('')
+    setPrReviewLoading(true)
+    setSelectedPrNumber('')
+    try {
+      const repo = repository.trim()
+      const response = await fetch(`/api/orchestrate/pr-review/pulls?repository=${encodeURIComponent(repo)}`)
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to load pull requests')
+
+      const pulls = Array.isArray(data.pulls) ? data.pulls : []
+      setPrReviewPulls(pulls)
+      if (pulls.length > 0) {
+        setSelectedPrNumber(String(pulls[0].number))
+      }
+    } catch (err) {
+      setPrReviewPulls([])
+      setPrReviewError(err.message)
+    } finally {
+      setPrReviewLoading(false)
+    }
+  }
+
+  const runPrReviewWorkflow = async (event) => {
+    event.preventDefault()
+    if (!selectedPrNumber) {
+      setPrReviewError('Select a PR number first.')
+      return
+    }
+    const selectedPr = prReviewPulls.find((item) => String(item.number) === String(selectedPrNumber))
+    if (!selectedPr) {
+      setPrReviewError('Selected PR details are unavailable. Validate repository again.')
+      return
+    }
+
+    setPrReviewError('')
+    setPrReviewSubmitting(true)
+    try {
+      const response = await fetch('/api/orchestrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jira_ticket_id: `PR-${selectedPr.number}`,
+          selected_agent: 'PR-Review',
+          selected_model: selectedModel || null,
+          repository,
+          base_branch: selectedPr.base_ref || 'development',
+          reviewer: reviewer || null,
+          commit_message: `chore(pr-review-${selectedPr.number}): review pull request #${selectedPr.number}`,
+          change_plan: [
+            `Review pull request #${selectedPr.number}: ${selectedPr.title}`,
+            'Evaluate correctness, risks, and missing tests',
+            'Document actionable review findings',
+          ],
+          jira_context: {
+            key: `PR-${selectedPr.number}`,
+            summary: `PR Review: #${selectedPr.number} ${selectedPr.title}`,
+            description: `Review URL: ${selectedPr.url || '-'}\nRepository: ${repository}\nAuthor: ${selectedPr.author || '-'}\nBase: ${selectedPr.base_ref || '-'}\nHead: ${selectedPr.head_ref || '-'}`,
+            type: 'Pull Request Review',
+            status: 'Open',
+            priority: 'Normal',
+          },
+        }),
+      })
+
+      const raw = await response.text()
+      const data = parseApiPayload(raw)
+      if (!response.ok) throw new Error(data.detail || 'Failed to start PR review workflow')
+      if (!data.job_id) throw new Error('Missing job id for PR review workflow')
+
+      setRunningJobs((prev) => {
+        const byId = new Map(prev.map((item) => [item.id, item]))
+        byId.set(data.job_id, {
+          id: data.job_id,
+          jira_ticket_id: `PR-${selectedPr.number}`,
+          repository,
+          selected_agent: 'PR-Review',
+          selected_model: selectedModel || null,
+        })
+        return Array.from(byId.values())
+      })
+      setActiveTab('executing')
+      setJobStatus('idle')
+    } catch (err) {
+      setPrReviewError(err.message)
+    } finally {
+      setPrReviewSubmitting(false)
+    }
   }
 
   const runTicketWorkflow = async (jiraTicketId, config = {}) => {
@@ -878,6 +974,46 @@ export default function App() {
                   </table>
                 </div>
               )}
+            </CollapsiblePanel>
+
+            <CollapsiblePanel
+              id="pr-review"
+              title="PR Review"
+              defaultExpanded={true}
+              expandedPanels={expandedPanels}
+              togglePanel={togglePanel}
+            >
+              <form onSubmit={runPrReviewWorkflow} className="form-grid trigger-form-grid">
+                <label>
+                  Repository (owner/repo or URL)
+                  <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
+                </label>
+
+                <div className="pr-review-actions-row">
+                  <button type="button" onClick={validateRepoAndLoadPulls} disabled={prReviewLoading || !canRun}>
+                    {prReviewLoading ? 'Validating...' : 'Validate Repo and Load PRs'}
+                  </button>
+                </div>
+
+                <label>
+                  Pull Request
+                  <select value={selectedPrNumber} onChange={(e) => setSelectedPrNumber(e.target.value)} disabled={prReviewPulls.length === 0}>
+                    {prReviewPulls.length === 0 && <option value="">No PRs loaded</option>}
+                    {prReviewPulls.map((pr) => (
+                      <option key={pr.number} value={String(pr.number)}>{pr.label}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <button type="submit" disabled={prReviewSubmitting || !selectedPrNumber || !canRun}>
+                  {prReviewSubmitting ? 'Starting...' : 'Run PR Review Workflow'}
+                </button>
+                {!canRun && (
+                  <p className="readonly-note">Your role has read-only access. Running PR review workflows is restricted to Admin and Developer roles.</p>
+                )}
+              </form>
+
+              {prReviewError && <p className="jira-search-error">{prReviewError}</p>}
             </CollapsiblePanel>
 
             {modelsError && <section className="panel error">Model load issue: {modelsError}</section>}

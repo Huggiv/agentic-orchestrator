@@ -105,6 +105,7 @@ export default function ChatConsole({
   const [isSending, setIsSending] = useState(false)
   const [isConfirming, setIsConfirming] = useState(false)
   const [isAssigning, setIsAssigning] = useState(false)
+  const [sessionsExpanded, setSessionsExpanded] = useState(false)
   const [chatError, setChatError] = useState('')
   const [streamStatus, setStreamStatus] = useState('')
   const listRef = useRef(null)
@@ -531,36 +532,6 @@ export default function ChatConsole({
         </div>
 
         <div className="chat-layout">
-          <aside className="chat-sessions">
-            <h4>Recent Chats</h4>
-            {sessions.map((session) => (
-              <div key={session.id} className={`chat-session-row${session.id === activeSessionId ? ' chat-session-row--active' : ''}`}>
-                <button
-                  type="button"
-                  className="chat-session-item"
-                  onClick={() => setActiveSessionId(session.id)}
-                >
-                  <span className="chat-session-title">{session.title || 'Chat'}</span>
-                  <span className="chat-session-meta-row">
-                    <span className={`chat-session-badge chat-session-badge--${session.status === 'closed' ? 'closed' : 'open'}`}>
-                      {session.status === 'closed' ? 'Closed' : 'Open'}
-                    </span>
-                    <span className="chat-session-trigger">{triggerStateLabel(session.triggerState)}</span>
-                  </span>
-                  <span className="chat-session-updated">Updated {formatTimeAgo(session.updatedAt)}</span>
-                </button>
-                <button
-                  type="button"
-                  className="chat-session-delete"
-                  onClick={() => deleteSession(session.id)}
-                  title="Delete chat"
-                >
-                  x
-                 </button>
-               </div>
-             ))}
-           </aside>
-
           <div className="chat-main">
             <div className="chat-thread" ref={listRef}>
               {orderedMessages.map((message) => (
@@ -573,7 +544,6 @@ export default function ChatConsole({
 
                   {message.kind === 'grooming_review' && (
                     <div className="chat-grooming-review">
-                      <pre>{JSON.stringify(message.payload?.grooming?.schema || {}, null, 2)}</pre>
                       <p><strong>Recommended flow:</strong> {message.payload?.grooming?.recommended_template || '-'}</p>
                       <p>{message.payload?.grooming?.recommendation_rationale || ''}</p>
                       {(message.payload?.grooming?.missing_fields || []).length > 0 && (
@@ -595,8 +565,7 @@ export default function ChatConsole({
 
                   {message.kind === 'session_confirmation' && !message.resolved && (
                     <div className="chat-inline-confirm">
-                      <p><strong>Prepared payload:</strong></p>
-                      <pre>{JSON.stringify(message.payload?.orchestration_payload || message.payload || {}, null, 2)}</pre>
+                      <p><strong>Review this implementation plan and confirm to trigger workflow.</strong></p>
                       <div className="chat-confirm-actions">
                         <button
                           type="button"
@@ -679,6 +648,50 @@ export default function ChatConsole({
 
             {chatError && <p className="chat-error">{chatError}</p>}
           </div>
+
+          <aside className={`chat-sessions chat-sessions--right${sessionsExpanded ? ' is-expanded' : ' is-collapsed'}`}>
+            <button
+              type="button"
+              className="chat-sessions-toggle"
+              onClick={() => setSessionsExpanded((prev) => !prev)}
+              title={sessionsExpanded ? 'Collapse recent chats' : 'Expand recent chats'}
+              aria-label={sessionsExpanded ? 'Collapse recent chats' : 'Expand recent chats'}
+            >
+              <span aria-hidden="true">{sessionsExpanded ? '⟩' : '⟨'}</span>
+              {sessionsExpanded && <span>Recent Chats</span>}
+            </button>
+
+            {sessionsExpanded && (
+              <>
+                {sessions.map((session) => (
+                  <div key={session.id} className={`chat-session-row${session.id === activeSessionId ? ' chat-session-row--active' : ''}`}>
+                    <button
+                      type="button"
+                      className="chat-session-item"
+                      onClick={() => setActiveSessionId(session.id)}
+                    >
+                      <span className="chat-session-title">{session.title || 'Chat'}</span>
+                      <span className="chat-session-meta-row">
+                        <span className={`chat-session-badge chat-session-badge--${session.status === 'closed' ? 'closed' : 'open'}`}>
+                          {session.status === 'closed' ? 'Closed' : 'Open'}
+                        </span>
+                        <span className="chat-session-trigger">{triggerStateLabel(session.triggerState)}</span>
+                      </span>
+                      <span className="chat-session-updated">Updated {formatTimeAgo(session.updatedAt)}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="chat-session-delete"
+                      onClick={() => deleteSession(session.id)}
+                      title="Delete chat"
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+              </>
+            )}
+          </aside>
         </div>
       </section>
   )

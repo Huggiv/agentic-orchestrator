@@ -530,6 +530,112 @@ def _derive_jira_seed_state(prompt: str, issues: list[dict], existing_state: dic
     return seeded
 
 
+def _compact_jira_issue_details(issue: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "key": str(issue.get("key") or "").upper(),
+        "summary": str(issue.get("summary") or ""),
+        "type": str(issue.get("type") or ""),
+        "status": str(issue.get("status") or ""),
+        "url": str(issue.get("url") or ""),
+        "description": str(issue.get("description") or ""),
+    }
+
+
+def _format_issue_lines(issue_details: list[dict[str, Any]]) -> list[str]:
+    if not issue_details:
+        return ["- No Jira issue details captured yet."]
+    lines: list[str] = []
+    for item in issue_details:
+        key = str(item.get("key") or "-")
+        summary = str(item.get("summary") or "No summary")
+        status = str(item.get("status") or "Unknown")
+        issue_type = str(item.get("type") or "Unknown")
+        lines.append(f"- {key}: {summary} (Type: {issue_type}, Status: {status})")
+    return lines
+
+
+def _build_grooming_message_for_chat(
+    *,
+    issue_details: list[dict[str, Any]],
+    grooming_payload: dict[str, Any],
+    trigger_state: str,
+) -> str:
+    schema = grooming_payload.get("schema") if isinstance(grooming_payload.get("schema"), dict) else {}
+    missing = grooming_payload.get("missing_fields") if isinstance(grooming_payload.get("missing_fields"), list) else []
+    follow_up = str(grooming_payload.get("follow_up_question") or "").strip()
+
+    lines = [
+        "I fetched Jira context and combined it with your additional notes.",
+        "",
+        "Jira Tickets:",
+        *_format_issue_lines(issue_details),
+        "",
+        "Structured Implementation Draft:",
+        f"- Problem: {str(schema.get('problem') or 'TBD')}",
+        f"- User Impact: {str(schema.get('user_impact') or 'TBD')}",
+    ]
+
+    goals = list(schema.get("goals") or [])
+    constraints = list(schema.get("constraints") or [])
+    acceptance = list(schema.get("acceptance_criteria") or [])
+
+    lines.append("- Goals:")
+    lines.extend([f"  - {item}" for item in goals] if goals else ["  - TBD"])
+    lines.append("- Constraints:")
+    lines.extend([f"  - {item}" for item in constraints] if constraints else ["  - TBD"])
+    lines.append("- Acceptance Criteria:")
+    lines.extend([f"  - {item}" for item in acceptance] if acceptance else ["  - TBD"])
+    lines.append("")
+
+    if missing:
+        lines.append(f"Missing fields before trigger: {', '.join(str(field) for field in missing)}")
+        if follow_up:
+            lines.append(f"Follow-up: {follow_up}")
+    else:
+        lines.append("All required fields are ready. Use Prepare Trigger when you want to review final confirmation.")
+
+    lines.append(f"Current trigger state: {trigger_state}")
+    return "\n".join(lines)
+
+
+def _build_confirmation_message_for_chat(
+    *,
+    issue_details: list[dict[str, Any]],
+    state: dict[str, Any],
+    run_payload: dict[str, Any],
+    template: str,
+    rationale: str,
+) -> str:
+    lines = [
+        "Workflow trigger is prepared for confirmation.",
+        "",
+        "Jira Tickets:",
+        *_format_issue_lines(issue_details),
+        "",
+        "Implementation Scope:",
+        f"- Problem: {str(state.get('problem') or 'TBD')}",
+        f"- User Impact: {str(state.get('user_impact') or 'TBD')}",
+        f"- Recommended Template: {template}",
+        f"- Rationale: {rationale}",
+        f"- Repository: {str(run_payload.get('repository') or '-')}",
+        f"- Base Branch: {str(run_payload.get('base_branch') or '-')}",
+        f"- Agent: {str(run_payload.get('selected_agent') or '-')}",
+        f"- Model: {str(run_payload.get('selected_model') or 'Auto')}",
+        "",
+        "Execution Tasks:",
+    ]
+
+    change_plan = run_payload.get("change_plan") if isinstance(run_payload.get("change_plan"), list) else []
+    if change_plan:
+        lines.extend([f"{idx}. {str(item)}" for idx, item in enumerate(change_plan, start=1)])
+    else:
+        lines.append("1. Implement the prepared scope")
+
+    lines.append("")
+    lines.append("Confirm to queue the workflow, or cancel to continue editing details in chat.")
+    return "\n".join(lines)
+
+
 @router.post("/chat/sessions")
 def create_chat_session(payload: ChatSessionCreateRequest, _user: dict = Depends(require_run_permission)):
     now = _utc_iso_now()
@@ -644,6 +750,7 @@ def send_chat_session_message(
         schema = grooming_payload.get("schema") or {}
         state = _normalize_grooming_state({**schema, "pending_field": grooming_payload.get("pending_field")})
         valid_ticket_ids = [str(issue.get("key") or "").upper() for issue in issues if issue.get("key")]
+        issue_details = [_compact_jira_issue_details(issue) for issue in issues]
         jira_enrichment = {
             "ticket_ids": valid_ticket_ids,
             "fetched": bool(issues),
@@ -653,6 +760,7 @@ def send_chat_session_message(
         metadata["grooming_state"] = state
         metadata["trigger_state"] = "ready_to_trigger" if grooming_payload.get("is_complete") else "grooming"
         metadata["last_ticket_ids"] = valid_ticket_ids or list(metadata.get("last_ticket_ids") or [])
+        metadata["jira_issue_details"] = issue_details or list(metadata.get("jira_issue_details") or [])
         metadata["model"] = selected_model
         metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}
 
@@ -668,7 +776,11 @@ def send_chat_session_message(
             session_id=session_id,
             role="assistant",
             kind="grooming_review",
-            content=str(result.get("assistant_message") or ""),
+            content=_build_grooming_message_for_chat(
+                issue_details=issue_details or list(metadata.get("jira_issue_details") or []),
+                grooming_payload=grooming_payload,
+                trigger_state=metadata["trigger_state"],
+            ),
             payload={
                 "grooming": grooming_payload,
                 "trigger_state": metadata["trigger_state"],
@@ -772,6 +884,11 @@ def prepare_chat_session_trigger(
     metadata["recommendation_rationale"] = rationale
     metadata["jira_prefill"] = jira_prefill
     metadata["model"] = selected_model
+    issue_details = (
+        metadata.get("jira_issue_details")
+        if isinstance(metadata.get("jira_issue_details"), list)
+        else []
+    )
 
     get_history_store().update_chat_session(
         session_id,
@@ -784,7 +901,13 @@ def prepare_chat_session_trigger(
         session_id=session_id,
         role="assistant",
         kind="session_confirmation",
-        content="Trigger payload prepared. Review values and confirm to launch workflow.",
+        content=_build_confirmation_message_for_chat(
+            issue_details=[item for item in issue_details if isinstance(item, dict)],
+            state=state,
+            run_payload=run_payload,
+            template=template,
+            rationale=rationale,
+        ),
         payload={
             "orchestration_payload": run_payload,
             "trigger_state": metadata["trigger_state"],
@@ -875,7 +998,7 @@ def confirm_chat_session_trigger(
 @router.delete("/chat/sessions/{session_id}")
 def archive_chat_session(session_id: str, _user: dict = Depends(require_run_permission)):
     _chat_session_or_404(session_id)
-    archived = get_history_store().archive_chat_session(session_id, _utc_iso_now())
+    archived = get_history_store().delete_chat_session(session_id)
     if not archived:
         raise HTTPException(status_code=404, detail="Chat session not found")
-    return {"session_id": session_id, "status": "closed"}
+    return {"session_id": session_id, "status": "deleted"}

@@ -1843,10 +1843,10 @@ button:hover {
 
 .chat-layout {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.75rem;
   min-height: 0;
-  height: 100%;
+  height: calc(100vh - 320px);
 }
 
 .chat-sessions {
@@ -1859,6 +1859,34 @@ button:hover {
   align-content: start;
   max-height: 100%;
   overflow-y: auto;
+}
+
+.chat-sessions--right {
+  height: 100%;
+  align-content: start;
+}
+
+.chat-sessions--right.is-collapsed {
+  width: 46px;
+  padding: 0.45rem 0.35rem;
+}
+
+.chat-sessions--right.is-expanded {
+  width: 260px;
+}
+
+.chat-sessions-toggle {
+  box-shadow: none;
+  border-radius: 8px;
+  border: 1px solid #35506f;
+  background: #13243a;
+  color: #cbe5ff;
+  padding: 0.35rem 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  font-size: 0.74rem;
 }
 
 .chat-sessions h4 {
@@ -2031,6 +2059,12 @@ button:hover {
   justify-content: flex-end;
 }
 
+.pr-review-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .jira-results-table {
   width: 100%;
   border-collapse: collapse;
@@ -2062,8 +2096,10 @@ button:hover {
 
 .chat-main {
   display: grid;
-  gap: 0.65rem;
+  gap: 0.5rem;
+  grid-template-rows: minmax(0, 1fr) auto auto;
   min-height: 0;
+  height: 100%;
 }
 
 .chat-thread {
@@ -2157,6 +2193,7 @@ button:hover {
   padding: 0.3rem;
   display: grid;
   gap: 0.35rem;
+  box-shadow: 0 -6px 16px #00000026;
 }
 
 .chat-composer textarea {
@@ -2472,6 +2509,12 @@ button:hover {
 
   .chat-layout {
     grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .chat-sessions--right.is-collapsed,
+  .chat-sessions--right.is-expanded {
+    width: 100%;
   }
 
   .jira-search-form {

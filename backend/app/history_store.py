@@ -506,6 +506,20 @@ class HistoryStore:
     def archive_chat_session(self, session_id: str, archived_at: str) -> bool:
         return self.update_chat_session(session_id, status="closed", updated_at=archived_at)
 
+    def delete_chat_session(self, session_id: str) -> bool:
+        with self._lock:
+            session_row = self._conn.execute(
+                "SELECT id FROM chat_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if session_row is None:
+                return False
+
+            self._conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+            self._conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+            self._conn.commit()
+            return True
+
 
 _history_store: HistoryStore | None = None
 _history_store_lock = Lock()

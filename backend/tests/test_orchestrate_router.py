@@ -1,6 +1,7 @@
 import time
 from threading import Event
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -479,6 +480,49 @@ def test_delete_orchestration_removes_history_and_workspace(monkeypatch, tmp_pat
         assert not workspace_dir.exists()
 
     reset_history_store_for_tests()
+
+
+def test_pr_review_pulls_returns_sorted_pull_requests(monkeypatch):
+    payload = [
+        {
+            "number": 14,
+            "title": "Fix telemetry parser",
+            "html_url": "https://github.com/owner/repo/pull/14",
+            "head": {"ref": "feature/fix-telemetry"},
+            "base": {"ref": "development"},
+            "user": {"login": "dev1"},
+            "updated_at": "2026-07-01T10:00:00Z",
+        },
+        {
+            "number": 25,
+            "title": "Add PR review agent support",
+            "html_url": "https://github.com/owner/repo/pull/25",
+            "head": {"ref": "feature/pr-review"},
+            "base": {"ref": "main"},
+            "user": {"login": "dev2"},
+            "updated_at": "2026-07-02T10:00:00Z",
+        },
+    ]
+
+    def fake_get(url, headers=None, params=None, timeout=0):
+        return SimpleNamespace(status_code=200, json=lambda: payload)
+
+    monkeypatch.setattr("app.routers.orchestrate.requests.get", fake_get)
+
+    with TestClient(app) as client:
+        response = client.get("/api/orchestrate/pr-review/pulls?repository=owner/repo")
+        response.raise_for_status()
+        body = response.json()
+
+    assert body["repository"] == "owner/repo"
+    assert [item["number"] for item in body["pulls"]] == [25, 14]
+    assert body["pulls"][0]["label"].startswith("#25 -")
+
+
+def test_pr_review_pulls_rejects_invalid_repository_format():
+    with TestClient(app) as client:
+        response = client.get("/api/orchestrate/pr-review/pulls?repository=not-a-repo")
+    assert response.status_code == 422
 
 
 def test_purge_history_endpoint_returns_deleted_count(monkeypatch):
