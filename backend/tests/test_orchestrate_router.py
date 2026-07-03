@@ -422,6 +422,36 @@ def test_delete_orchestration_removes_history_and_workspace(monkeypatch, tmp_pat
     monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
     reset_history_store_for_tests()
 
+
+def test_delete_orchestration_allows_stale_running_job_without_active_controls(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_FLOW_HISTORY_DB_PATH", str(tmp_path / "orchestration-history.db"))
+    reset_history_store_for_tests()
+
+    store = get_history_store()
+    job_id = "stale-running-job"
+    store.create_job(
+        job_id=job_id,
+        created_at="2026-07-03T10:00:00+00:00",
+        request_payload={
+            "jira_ticket_id": "AGENT_FLOW-777",
+            "repository": "owner/repo",
+            "base_branch": "development",
+            "commit_message": "feat(agent_flow-777): automated implementation",
+            "change_plan": ["Implement"],
+        },
+    )
+    store.set_job_fields(job_id, status="running")
+
+    with TestClient(app) as client:
+        delete_response = client.delete(f"/api/orchestrate/{job_id}")
+        delete_response.raise_for_status()
+        assert delete_response.json()["deleted"] is True
+
+        status_response = client.get(f"/api/orchestrate/{job_id}")
+        assert status_response.status_code == 404
+
+    reset_history_store_for_tests()
+
     def fake_run_orchestration(
         jira_ticket_id,
         repository,

@@ -39,6 +39,10 @@ const resolveAllowedActions = (details) => {
     return ['approve', 'reject', 'cancel']
   }
 
+  if (details?.status === 'blocked_approval') {
+    return ['cancel']
+  }
+
   return []
 }
 

@@ -64,7 +64,8 @@ describe('ExecutingJobs controls', () => {
 
     expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: 'Reject' })).toBeInTheDocument()
-    expect(await screen.findByText(/approval required/i)).toBeInTheDocument()
+    const approvalNotices = await screen.findAllByText(/approval required/i)
+    expect(approvalNotices.length).toBeGreaterThan(0)
   })
 
   it('falls back to approval controls when blocked at create_pr and allowed_actions is missing', async () => {
@@ -88,12 +89,41 @@ describe('ExecutingJobs controls', () => {
       />
     )
 
-    expect(await screen.findByText(/approval required/i)).toBeInTheDocument()
+    const approvalNotices = await screen.findAllByText(/approval required/i)
+    expect(approvalNotices.length).toBeGreaterThan(0)
     expect(within(container).queryByRole('button', { name: 'Pause' })).not.toBeInTheDocument()
     expect(within(container).queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument()
     expect(await within(container).findByRole('button', { name: 'Approve' })).toBeInTheDocument()
     expect(within(container).getByRole('button', { name: 'Reject' })).toBeInTheDocument()
     expect(within(container).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+  })
+
+  it('shows cancel fallback when blocked_approval has no allowed_actions for unknown checkpoint', async () => {
+    fetch.mockImplementation(async (url) => {
+      if (String(url).includes('/api/orchestrate/job-unknown-step')) {
+        return makeResponse({
+          status: 'blocked_approval',
+          progress: [],
+          current_step: 'manual_review_gate',
+          next_step: null,
+          result: null,
+          error: null,
+        })
+      }
+      return makeResponse({ detail: 'not found' }, false)
+    })
+
+    const { container } = render(
+      <ExecutingJobs
+        runningJobs={[{ id: 'job-unknown-step', jira_ticket_id: 'AGENT_FLOW-31', repository: 'owner/repo' }]}
+      />
+    )
+
+    const approvalNoticesUnknown = await screen.findAllByText(/approval required/i)
+    expect(approvalNoticesUnknown.length).toBeGreaterThan(0)
+    expect(within(container).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(within(container).queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
+    expect(await within(container).findByRole('button', { name: 'Cancel' })).toBeInTheDocument()
   })
 
   it('shows artifact view/download actions and calls handlers', async () => {

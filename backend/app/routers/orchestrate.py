@@ -253,6 +253,14 @@ def _is_terminal_status(status: str) -> bool:
     return status in {"success", "failed", "cancelled"}
 
 
+def _job_has_active_runtime_controls(job_id: str) -> bool:
+    with _JOB_CANCEL_LOCK:
+        has_token = job_id in _JOB_CANCEL_TOKENS
+    with _JOB_CONTROL_LOCK:
+        has_control = job_id in _JOB_CONTROLS
+    return has_token or has_control
+
+
 def _build_step_logs(progress: list[dict], result_steps: list[dict] | None = None) -> list[dict]:
     by_step: dict[str, dict] = {}
 
@@ -1020,7 +1028,9 @@ def delete_orchestration(job_id: str, _admin: dict = Depends(require_admin)):
 
     status = str(job.get("status") or "")
     if status in {"queued", "running", "paused", "blocked_approval"}:
-        raise HTTPException(status_code=409, detail="Cannot delete a running job. Cancel it first.")
+        if _job_has_active_runtime_controls(job_id):
+            raise HTTPException(status_code=409, detail="Cannot delete a running job. Cancel it first.")
+        # Stale non-terminal job (for example after process restart): allow cleanup.
 
     deleted = history_store.delete_job(job_id)
     return {"job_id": job_id, "deleted": bool(deleted)}
