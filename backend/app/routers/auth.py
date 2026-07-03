@@ -217,8 +217,10 @@ def signup(payload: SignupPayload, response: Response):
         password_hash=hash_password(payload.password),
         now_iso=now.isoformat(),
     )
+    store.update_last_login(user_id=int(user["id"]), now_iso=now.isoformat())
+    user = store.get_user_by_email(email) or user
 
-    token = _start_session(store, user_id=int(user["id"]), now=now)
+    token = _start_session(store, user=user, now=now)
     _session_cookie(response, token)
     return {"authenticated": True, "user": user}
 
@@ -235,7 +237,8 @@ def login(payload: LoginPayload, response: Response):
 
     now = _utcnow()
     store.update_last_login(user_id=int(user["id"]), now_iso=now.isoformat())
-    token = _start_session(store, user_id=int(user["id"]), now=now)
+    user = store.get_user_by_email(email) or user
+    token = _start_session(store, user=user, now=now)
     _session_cookie(response, token)
     return {"authenticated": True, "user": user}
 
@@ -252,7 +255,7 @@ def get_session(response: Response, session_token: str | None = Cookie(default=N
 @router.post("/logout")
 def logout(response: Response, session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME)):
     if session_token:
-        get_auth_store().delete_session(session_token)
+        get_auth_store().delete_session(session_token, now_iso=_utcnow().isoformat())
     _clear_session_cookie(response)
     return {"ok": True}
 
@@ -277,12 +280,13 @@ def update_user_role(payload: UpdateRolePayload, _admin: dict = Depends(require_
     return {"ok": True, "user": updated}
 
 
-def _start_session(store, *, user_id: int, now: datetime) -> str:
+def _start_session(store, *, user: dict, now: datetime) -> str:
     session_token = secrets.token_urlsafe(48)
     store.create_session(
         session_token=session_token,
-        user_id=user_id,
+        user_id=int(user["id"]),
         created_at=now.isoformat(),
         expires_at=session_expiry_from(now),
+        user_snapshot=user,
     )
     return session_token

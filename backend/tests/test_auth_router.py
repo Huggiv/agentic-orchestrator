@@ -1,4 +1,5 @@
 from datetime import timedelta
+import sqlite3
 
 from fastapi.testclient import TestClient
 
@@ -54,6 +55,7 @@ def test_signup_rejects_weak_password_and_mismatch(monkeypatch, tmp_path):
 
 def test_first_user_is_admin_and_login_creates_session(monkeypatch, tmp_path):
     _enable_auth(monkeypatch, tmp_path)
+    auth_db_path = tmp_path / "auth.db"
 
     with TestClient(app) as client:
         signup_response = _signup(client, name="Owner", email="owner@example.com", password=STRONG)
@@ -74,6 +76,23 @@ def test_first_user_is_admin_and_login_creates_session(monkeypatch, tmp_path):
         ok = fresh.post("/api/auth/login", json={"email": "owner@example.com", "password": STRONG})
         ok.raise_for_status()
         assert ok.json()["user"]["role"] == "admin"
+        assert ok.json()["user"]["last_login_at"] is not None
+
+    with sqlite3.connect(auth_db_path) as conn:
+        activity = conn.execute(
+            """
+            SELECT user_email, user_role, login_at, last_seen_at, logout_at
+            FROM user_login_activity
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert activity is not None
+    assert activity[0] == "owner@example.com"
+    assert activity[1] == "admin"
+    assert activity[2] is not None
+    assert activity[3] is not None
+    assert activity[4] is None
 
     reset_auth_store_for_tests()
     reset_history_store_for_tests()

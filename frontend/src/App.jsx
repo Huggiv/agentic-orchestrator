@@ -707,6 +707,12 @@ export default function App() {
             {runningJobs.length > 0 && <span className="topnav-badge">{runningJobs.length}</span>}
           </button>
           <button
+            className={`topnav-tab${activeTab === 'copilot-chat' ? ' topnav-tab--active' : ''}`}
+            onClick={() => setActiveTab('copilot-chat')}
+          >
+            Copilot Chat
+          </button>
+          <button
             className={`topnav-tab${activeTab === 'history' ? ' topnav-tab--active' : ''}`}
             onClick={() => setActiveTab('history')}
           >
@@ -930,6 +936,30 @@ export default function App() {
       {activeTab === 'executing' && (
         <section className="panel">
           <ExecutingJobs runningJobs={runningJobs} onJobComplete={handleJobComplete} />
+        </section>
+      )}
+
+      {activeTab === 'copilot-chat' && (
+        <section className="panel">
+          {canRun ? (
+            <ChatConsole
+              repository={repository}
+              setRepository={setRepository}
+              reviewer={reviewer}
+              setReviewer={setReviewer}
+              selectedAgent={selectedAgent}
+              setSelectedAgent={setSelectedAgent}
+              selectedModel={selectedModel}
+              setSelectedModel={setSelectedModel}
+              availableAgents={availableAgents}
+              availableModels={availableModels}
+              modelsLoading={modelsLoading}
+              onRefreshModels={() => loadModels({ force: true })}
+              onJobsQueued={handleChatQueuedJobs}
+            />
+          ) : (
+            <p className="readonly-note">Your role has read-only access. Copilot Chat workflow actions are restricted to Admin and Developer roles.</p>
+          )}
         </section>
       )}
 
@@ -1240,24 +1270,6 @@ export default function App() {
             </div>
           </div>
         </div>
-      )}
-
-      {canRun && (
-        <ChatConsole
-          repository={repository}
-          setRepository={setRepository}
-          reviewer={reviewer}
-          setReviewer={setReviewer}
-          selectedAgent={selectedAgent}
-          setSelectedAgent={setSelectedAgent}
-          selectedModel={selectedModel}
-          setSelectedModel={setSelectedModel}
-          availableAgents={availableAgents}
-          availableModels={availableModels}
-          modelsLoading={modelsLoading}
-          onRefreshModels={() => loadModels({ force: true })}
-          onJobsQueued={handleChatQueuedJobs}
-        />
       )}
 
       {/* Footer */}

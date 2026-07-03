@@ -51,6 +51,25 @@ class AuthStore:
 
                 CREATE INDEX IF NOT EXISTS idx_sessions_user
                 ON user_sessions(user_id);
+
+                CREATE TABLE IF NOT EXISTS user_login_activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_token TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    user_name TEXT NOT NULL,
+                    user_email TEXT NOT NULL,
+                    user_role TEXT NOT NULL,
+                    login_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    logout_at TEXT,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_login_activity_user
+                ON user_login_activity(user_id, id DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_login_activity_session
+                ON user_login_activity(session_token);
                 """
             )
             self._conn.commit()
@@ -170,6 +189,7 @@ class AuthStore:
         user_id: int,
         created_at: str,
         expires_at: str,
+        user_snapshot: dict[str, Any],
     ) -> None:
         with self._lock:
             self._conn.execute(
@@ -178,6 +198,22 @@ class AuthStore:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (session_token, user_id, created_at, created_at, expires_at),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO user_login_activity (
+                    session_token, user_id, user_name, user_email, user_role, login_at, last_seen_at, logout_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    session_token,
+                    user_id,
+                    str(user_snapshot.get("name") or ""),
+                    str(user_snapshot.get("email") or ""),
+                    str(user_snapshot.get("role") or "user"),
+                    created_at,
+                    created_at,
+                ),
             )
             self._conn.commit()
 
@@ -191,10 +227,28 @@ class AuthStore:
                 """,
                 (now_iso, expires_at, session_token),
             )
+            self._conn.execute(
+                """
+                UPDATE user_login_activity
+                SET last_seen_at = ?
+                WHERE session_token = ?
+                  AND logout_at IS NULL
+                """,
+                (now_iso, session_token),
+            )
             self._conn.commit()
 
-    def delete_session(self, session_token: str) -> None:
+    def delete_session(self, session_token: str, now_iso: str | None = None) -> None:
         with self._lock:
+            if now_iso:
+                self._conn.execute(
+                    """
+                    UPDATE user_login_activity
+                    SET logout_at = COALESCE(logout_at, ?), last_seen_at = ?
+                    WHERE session_token = ?
+                    """,
+                    (now_iso, now_iso, session_token),
+                )
             self._conn.execute("DELETE FROM user_sessions WHERE session_token = ?", (session_token,))
             self._conn.commit()
 
@@ -239,6 +293,21 @@ class AuthStore:
 
     def purge_expired_sessions(self, *, now_iso: str) -> int:
         with self._lock:
+            expired_rows = self._conn.execute(
+                "SELECT session_token FROM user_sessions WHERE expires_at < ?",
+                (now_iso,),
+            ).fetchall()
+            expired_tokens = [str(row["session_token"]) for row in expired_rows]
+            if expired_tokens:
+                placeholders = ",".join("?" for _ in expired_tokens)
+                self._conn.execute(
+                    f"""
+                    UPDATE user_login_activity
+                    SET logout_at = COALESCE(logout_at, ?), last_seen_at = ?
+                    WHERE session_token IN ({placeholders})
+                    """,
+                    [now_iso, now_iso, *expired_tokens],
+                )
             cursor = self._conn.execute("DELETE FROM user_sessions WHERE expires_at < ?", (now_iso,))
             self._conn.commit()
             return int(cursor.rowcount or 0)

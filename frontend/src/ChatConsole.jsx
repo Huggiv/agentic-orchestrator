@@ -9,7 +9,6 @@ import {
   sendChatSessionMessage,
 } from './services/chat'
 
-const CHAT_LAUNCHER_POS_KEY = 'agentflow.chat.launcher.position.v1'
 const MAX_CHAT_SESSIONS = 5
 
 const createInitialAssistantMessage = () => ({
@@ -40,10 +39,22 @@ const toLocalTimestamp = (value) => {
   return parsed
 }
 
-const mapRemoteMessage = (message) => ({
+const deriveMessageKind = (message) => {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : null
+  if (message?.kind && message.kind !== 'text') return message.kind
+  if (payload?.orchestration_payload || payload?.trigger_state === 'awaiting_confirmation') {
+    return 'session_confirmation'
+  }
+  if (payload?.grooming) {
+    return 'grooming_review'
+  }
+  return message?.kind || 'text'
+}
+
+const mapServerMessage = (message) => ({
   id: message.id,
   role: message.role === 'assistant' ? 'assistant' : 'user',
-  kind: message.kind || 'text',
+  kind: deriveMessageKind(message),
   createdAt: toLocalTimestamp(message.created_at),
   content: message.content || '',
   payload: message.payload || null,
@@ -58,6 +69,14 @@ const formatTimeAgo = (timestampMs) => {
   if (deltaHours < 24) return `${deltaHours}h ago`
   const deltaDays = Math.floor(deltaHours / 24)
   return `${deltaDays}d ago`
+}
+
+const formatClockTime = (timestampMs) => {
+  if (!timestampMs) return ''
+  return new Date(timestampMs).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 const triggerStateLabel = (state) => {
@@ -80,10 +99,6 @@ export default function ChatConsole({
   onRefreshModels,
   onJobsQueued,
 }) {
-  const [chatMode, setChatMode] = useState('support')
-  const [isOpen, setIsOpen] = useState(false)
-  const [launcherPosition, setLauncherPosition] = useState(null)
-  const dragRef = useRef({ dragging: false, offsetX: 0, offsetY: 0 })
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState('')
   const [draft, setDraft] = useState('')
@@ -92,7 +107,6 @@ export default function ChatConsole({
   const [isAssigning, setIsAssigning] = useState(false)
   const [chatError, setChatError] = useState('')
   const [streamStatus, setStreamStatus] = useState('')
-  const [streamPhases, setStreamPhases] = useState([])
   const listRef = useRef(null)
 
   const ensureRemoteSession = async () => {
@@ -104,7 +118,7 @@ export default function ChatConsole({
 
     const created = await createChatSession({
       title: current.title,
-      mode: chatMode,
+      mode: 'interactive',
       model: selectedModel || null,
       client_context: {
         active_repository: repository,
@@ -125,7 +139,7 @@ export default function ChatConsole({
   )
 
   const messages = activeSession?.messages || []
-  const activeGrooming = activeSession?.grooming || null
+  const openSessionCount = sessions.filter((session) => session.status !== 'closed').length
 
   const orderedMessages = useMemo(
     () => [...messages].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)),
@@ -171,12 +185,11 @@ export default function ChatConsole({
     persistSessions([session, ...sessions], session.id)
     setDraft('')
     setStreamStatus('')
-    setStreamPhases([])
     setChatError('')
   }
 
-  const assignGrooming = async (messageId, groomingPayload) => {
-    if (!groomingPayload || !groomingPayload.schema || isAssigning) return
+  const prepareSessionTrigger = async (messageId) => {
+    if (isAssigning) return
     if (!activeSessionId) return
     setIsAssigning(true)
     setChatError('')
@@ -193,31 +206,31 @@ export default function ChatConsole({
 
       updateActiveSession((session) => ({
         ...session,
-        messages: session.messages.map((message) =>
-          message.id === messageId
-            ? {
-                ...message,
-                resolved: true,
-                preparedPayload: prepared?.orchestration_payload || null,
-              }
-            : message
-        ),
-      }))
-
-      updateActiveSession((session) => ({
-        ...session,
+        triggerState: prepared?.trigger_state?.status || 'awaiting_confirmation',
         messages: [
-          ...session.messages,
-          {
-            id: `assistant-prepare-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            role: 'assistant',
-            kind: 'session_confirmation',
-            createdAt: Date.now(),
-            resolved: false,
-            remoteSessionId: remoteId,
-            content: prepared?.assistant_message?.content || 'Trigger payload prepared. Confirm launch.',
-            payload: prepared?.orchestration_payload || null,
-          },
+          ...session.messages.map((message) =>
+            message.id === messageId
+              ? {
+                  ...message,
+                  resolved: true,
+                  preparedPayload: prepared?.orchestration_payload || null,
+                }
+              : message
+          ),
+          prepared?.assistant_message
+            ? mapServerMessage(prepared.assistant_message)
+            : {
+                id: `assistant-prepare-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                role: 'assistant',
+                kind: 'session_confirmation',
+                createdAt: Date.now(),
+                resolved: false,
+                content: 'Trigger payload prepared. Confirm launch.',
+                payload: {
+                  orchestration_payload: prepared?.orchestration_payload || null,
+                  trigger_state: prepared?.trigger_state?.status || 'awaiting_confirmation',
+                },
+              },
         ],
       }))
     } catch (err) {
@@ -305,7 +318,7 @@ export default function ChatConsole({
       .then((messagesPayload) => {
         if (!alive) return
         const mappedMessages = Array.isArray(messagesPayload) && messagesPayload.length > 0
-          ? messagesPayload.map(mapRemoteMessage)
+          ? messagesPayload.map(mapServerMessage)
           : [createInitialAssistantMessage()]
 
         setSessions((prev) =>
@@ -339,92 +352,24 @@ export default function ChatConsole({
   }, [sessions, activeSessionId])
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(CHAT_LAUNCHER_POS_KEY)
-      if (!raw) return
-      const parsed = JSON.parse(raw)
-      if (typeof parsed?.x === 'number' && typeof parsed?.y === 'number') {
-        setLauncherPosition({ x: parsed.x, y: parsed.y })
-      }
-    } catch {
-      return
-    }
-  }, [])
-
-  const persistLauncherPosition = (position) => {
-    setLauncherPosition(position)
-    try {
-      localStorage.setItem(CHAT_LAUNCHER_POS_KEY, JSON.stringify(position))
-    } catch {
-      return
-    }
-  }
-
-  const bindDragHandlers = () => {
-    const onPointerMove = (event) => {
-      if (!dragRef.current.dragging) return
-      const x = event.clientX - dragRef.current.offsetX
-      const y = event.clientY - dragRef.current.offsetY
-      const maxX = Math.max(0, window.innerWidth - 60)
-      const maxY = Math.max(0, window.innerHeight - 60)
-      persistLauncherPosition({
-        x: Math.min(maxX, Math.max(0, x)),
-        y: Math.min(maxY, Math.max(0, y)),
-      })
-    }
-
-    const onPointerUp = () => {
-      dragRef.current.dragging = false
-      window.removeEventListener('pointermove', onPointerMove)
-      window.removeEventListener('pointerup', onPointerUp)
-    }
-
-    window.addEventListener('pointermove', onPointerMove)
-    window.addEventListener('pointerup', onPointerUp)
-  }
-
-  const startLauncherDrag = (event) => {
-    const rect = event.currentTarget.getBoundingClientRect()
-    dragRef.current.dragging = true
-    dragRef.current.offsetX = event.clientX - rect.left
-    dragRef.current.offsetY = event.clientY - rect.top
-    bindDragHandlers()
-  }
-
-  useEffect(() => {
     if (!listRef.current) return
     listRef.current.scrollTop = listRef.current.scrollHeight
   }, [orderedMessages, streamStatus])
 
-  const appendAssistantDelta = (assistantId, delta) => {
-    if (!delta) return
-  }
-
-  const setAssistantText = (assistantId, text) => {
+  const replaceAssistantMessage = (assistantId, message) => {
+    const normalized = message ? mapServerMessage(message) : null
     updateActiveSession((session) => ({
       ...session,
       messages: session.messages.map((message) =>
         message.id === assistantId
-          ? { ...message, content: text || '' }
+          ? {
+              ...message,
+              ...(normalized || {}),
+              content: normalized?.content || message.content || '',
+            }
           : message
       ),
     }))
-  }
-
-  const addPhase = (label) => {
-    if (!label) return
-    setStreamPhases((prev) => {
-      if (prev.length > 0 && prev[prev.length - 1].label === label) {
-        return prev
-      }
-      return [
-        ...prev,
-        {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          label,
-        },
-      ]
-    })
   }
 
   const sendMessage = async (event) => {
@@ -435,7 +380,6 @@ export default function ChatConsole({
     setDraft('')
     setChatError('')
     setStreamStatus('Processing message...')
-    setStreamPhases([{ id: `phase-${Date.now()}`, label: 'Processing message...' }])
     setIsSending(true)
 
     const userId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -452,10 +396,9 @@ export default function ChatConsole({
 
     try {
       const remoteId = await ensureRemoteSession()
-      addPhase('Sending to session API')
       const data = await sendChatSessionMessage(remoteId, {
         message: userMessage,
-        mode: chatMode,
+        mode: 'interactive',
         model: selectedModel || null,
         client_context: {
           active_repository: repository,
@@ -465,62 +408,25 @@ export default function ChatConsole({
         },
       })
 
-      const groomingSchema = data?.grooming && typeof data.grooming === 'object' ? data.grooming : null
-      const missingFields = Array.isArray(data?.assistant_message?.payload?.grooming?.missing_fields)
-        ? data.assistant_message.payload.grooming.missing_fields
-        : []
-      const isComplete = missingFields.length === 0 && Boolean(groomingSchema)
-
-      if (chatMode === 'grooming' && groomingSchema) {
-        updateActiveSession((session) => ({
-          ...session,
-          triggerState: data?.trigger_state?.status || session.triggerState || 'grooming',
-          grooming: {
-            schema: groomingSchema,
-            missing_fields: missingFields,
-            is_complete: isComplete,
-            recommended_template:
-              data?.assistant_message?.payload?.grooming?.recommended_template ||
-              (data?.assistant_message?.payload?.trigger_state === 'ready_to_trigger' ? 'feature' : null),
-            recommendation_rationale: data?.assistant_message?.payload?.grooming?.recommendation_rationale || '',
-            pending_field: data?.assistant_message?.payload?.grooming?.pending_field || null,
-            follow_up_question: data?.assistant_message?.payload?.grooming?.follow_up_question || null,
-          },
-          messages: [
-            ...session.messages,
-            {
-              id: `grooming-review-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              role: 'assistant',
-              kind: 'grooming_review',
-              createdAt: Date.now(),
-              resolved: false,
-              content: JSON.stringify(groomingSchema, null, 2),
-              grooming: {
-                schema: groomingSchema,
-                missing_fields: missingFields,
-                is_complete: isComplete,
-                recommended_template: data?.assistant_message?.payload?.grooming?.recommended_template || 'feature',
-                recommendation_rationale: data?.assistant_message?.payload?.grooming?.recommendation_rationale || '',
-                follow_up_question: data?.assistant_message?.payload?.grooming?.follow_up_question || null,
-              },
-            },
-          ],
-        }))
-      }
-
       if ((data?.assistant_message?.content || '').trim()) {
-        setAssistantText(assistantId, data.assistant_message.content)
+        replaceAssistantMessage(assistantId, data.assistant_message)
       } else {
-        setAssistantText(assistantId, 'Done.')
+        replaceAssistantMessage(assistantId, {
+          id: assistantId,
+          role: 'assistant',
+          kind: 'text',
+          created_at: new Date().toISOString(),
+          content: 'Done.',
+          payload: null,
+        })
       }
       updateActiveSession((session) => ({
         ...session,
         triggerState: data?.trigger_state?.status || session.triggerState || 'draft',
+        grooming: data?.assistant_message?.payload?.grooming || session.grooming || null,
       }))
-      addPhase('Completed response generation')
     } catch (err) {
       setChatError(err.message)
-      addPhase('Request failed')
       setStreamStatus('')
       updateActiveSession((session) => {
         const next = [...session.messages]
@@ -545,6 +451,13 @@ export default function ChatConsole({
       setStreamStatus('')
       setIsSending(false)
     }
+  }
+
+  const handleComposerKeyDown = (event) => {
+    if (event.key !== 'Enter' || event.shiftKey) return
+    event.preventDefault()
+    if (!canSend) return
+    sendMessage(event)
   }
 
   const confirmSessionTrigger = async (messageId, remoteSessionId, confirm) => {
@@ -592,45 +505,20 @@ export default function ChatConsole({
     }
   }
 
-  if (!isOpen) {
-    return (
-      <div
-        className="chat-fab-shell chat-fab-shell--launcher"
-        style={launcherPosition ? { left: `${launcherPosition.x}px`, top: `${launcherPosition.y}px`, right: 'auto', bottom: 'auto', transform: 'none' } : undefined}
-      >
-        <button
-          type="button"
-          className="chat-fab-launcher"
-          onPointerDown={startLauncherDrag}
-          onDoubleClick={() => setIsOpen(true)}
-          title="Drag to move. Double-click to open."
-        >
-          🤖
-        </button>
-      </div>
-    )
-  }
-
   return (
-    <div className="chat-fab-shell">
-      <section className="panel chat-panel chat-panel--floating">
+    <section className="panel chat-panel chat-panel--tab">
         <div className="chat-header">
-          <strong>Copilot Chat</strong>
+          <div className="chat-header-title">
+            <strong>Copilot Chat</strong>
+            <span>Session-first orchestration assistant</span>
+          </div>
           <div className="chat-header-actions">
+            <span className="chat-header-chip">{openSessionCount} open</span>
             <button type="button" onClick={createNewSession}>New</button>
-            <button type="button" onClick={() => setIsOpen(false)}>Minimize</button>
           </div>
         </div>
 
         <div className="chat-settings chat-settings--top">
-          <label>
-            Mode
-            <select value={chatMode} onChange={(e) => setChatMode(e.target.value)}>
-              <option value="support">Support</option>
-              <option value="grooming">Grooming</option>
-            </select>
-          </label>
-
           <label>
             Repository
             <input value={repository} onChange={(e) => setRepository(e.target.value)} placeholder="owner/repo" required />
@@ -676,26 +564,26 @@ export default function ChatConsole({
           <div className="chat-main">
             <div className="chat-thread" ref={listRef}>
               {orderedMessages.map((message) => (
-                <article
-                  key={message.id}
-                  className={`chat-message chat-message--${message.role}`}
-                >
-                  <header>{message.role === 'assistant' ? 'Copilot' : 'You'}</header>
+                <article key={message.id} className={`chat-message chat-message--${message.role}`}>
+                  <header>
+                    <span>{message.role === 'assistant' ? 'Copilot' : 'You'}</span>
+                    <time>{formatClockTime(message.createdAt)}</time>
+                  </header>
                   <p>{message.content}</p>
 
                   {message.kind === 'grooming_review' && (
                     <div className="chat-grooming-review">
-                      <pre>{message.content || 'No grooming summary available.'}</pre>
-                      <p><strong>Recommended flow:</strong> {message.grooming?.recommended_template || '-'}</p>
-                      <p>{message.grooming?.recommendation_rationale || ''}</p>
-                      {(message.grooming?.missing_fields || []).length > 0 && (
-                        <p><strong>Follow-up:</strong> {message.grooming?.follow_up_question || 'Please provide remaining fields.'}</p>
+                      <pre>{JSON.stringify(message.payload?.grooming?.schema || {}, null, 2)}</pre>
+                      <p><strong>Recommended flow:</strong> {message.payload?.grooming?.recommended_template || '-'}</p>
+                      <p>{message.payload?.grooming?.recommendation_rationale || ''}</p>
+                      {(message.payload?.grooming?.missing_fields || []).length > 0 && (
+                        <p><strong>Follow-up:</strong> {message.payload?.grooming?.follow_up_question || 'Please provide remaining fields.'}</p>
                       )}
-                      {(message.grooming?.missing_fields || []).length === 0 && (
+                      {(message.payload?.grooming?.missing_fields || []).length === 0 && (
                         <div className="chat-confirm-actions">
                           <button
                             type="button"
-                            onClick={() => assignGrooming(message.id, message.grooming)}
+                            onClick={() => prepareSessionTrigger(message.id)}
                             disabled={isAssigning || message.resolved}
                           >
                             {isAssigning ? 'Preparing...' : (message.resolved ? 'Prepared' : 'Prepare Trigger')}
@@ -708,11 +596,11 @@ export default function ChatConsole({
                   {message.kind === 'session_confirmation' && !message.resolved && (
                     <div className="chat-inline-confirm">
                       <p><strong>Prepared payload:</strong></p>
-                      <pre>{JSON.stringify(message.payload || {}, null, 2)}</pre>
+                      <pre>{JSON.stringify(message.payload?.orchestration_payload || message.payload || {}, null, 2)}</pre>
                       <div className="chat-confirm-actions">
                         <button
                           type="button"
-                          onClick={() => confirmSessionTrigger(message.id, message.remoteSessionId, true)}
+                          onClick={() => confirmSessionTrigger(message.id, activeSession?.remoteId, true)}
                           disabled={isConfirming}
                         >
                           {isConfirming ? 'Processing...' : 'Confirm and Trigger Workflow'}
@@ -720,7 +608,7 @@ export default function ChatConsole({
                         <button
                           type="button"
                           className="chat-confirm-cancel"
-                          onClick={() => confirmSessionTrigger(message.id, message.remoteSessionId, false)}
+                          onClick={() => confirmSessionTrigger(message.id, activeSession?.remoteId, false)}
                           disabled={isConfirming}
                         >
                           Cancel
@@ -739,63 +627,59 @@ export default function ChatConsole({
               )}
             </div>
 
-            <form className="chat-composer chat-composer--floating" onSubmit={sendMessage}>
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={
-                  chatMode === 'grooming'
-                    ? 'Describe requirements, or answer follow-up prompts to complete grooming...'
-                    : 'Ask to groom Jira issues or trigger workflow with confirmation...'
-                }
-                rows={4}
-              />
+            <form className="chat-composer chat-composer--embedded" onSubmit={sendMessage}>
+              <div className="chat-composer-shell">
+                <textarea
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  placeholder="Ask about Jira tickets, refine requirements, and confirm workflow triggers here..."
+                  rows={4}
+                />
 
-              <div className="chat-composer-corner">
-                <select value={selectedAgent} onChange={(e) => setSelectedAgent(e.target.value)}>
-                  {availableAgents.map((agent) => (
-                    <option key={agent} value={agent}>{agent}</option>
-                  ))}
-                </select>
-                <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
-                  <option value="">Auto</option>
-                  {availableModels.map((model) => (
-                    <option key={model.id} value={model.id}>{model.name}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="chat-model-refresh icon-refresh-button"
-                  onClick={onRefreshModels}
-                  disabled={modelsLoading}
-                  title="Refresh model list used by chat composer"
-                  aria-label="Refresh chat model list"
-                >
-                  <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
-                </button>
-                <button type="submit" disabled={!canSend}>
-                  {isSending ? 'Sending...' : 'Send'}
-                </button>
+                <div className="chat-composer-toolbar">
+                  <div className="chat-composer-controls">
+                    <label className="chat-composer-control" title="Selected agent">
+                      <span className="chat-control-icon" aria-hidden="true">🤖</span>
+                      <select value={selectedAgent} onChange={(e) => setSelectedAgent(e.target.value)}>
+                        {availableAgents.map((agent) => (
+                          <option key={agent} value={agent}>{agent}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="chat-composer-control" title="Selected model">
+                      <span className="chat-control-icon" aria-hidden="true">🧠</span>
+                      <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+                        <option value="">Auto</option>
+                        {availableModels.map((model) => (
+                          <option key={model.id} value={model.id}>{model.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="chat-composer-actions">
+                    <button
+                      type="button"
+                      className="chat-model-refresh icon-refresh-button"
+                      onClick={onRefreshModels}
+                      disabled={modelsLoading}
+                      title="Refresh chat model list"
+                      aria-label="Refresh chat model list"
+                    >
+                      <span className={`icon-refresh-glyph${modelsLoading ? ' is-spinning' : ''}`} aria-hidden="true">⟳</span>
+                    </button>
+                    <button type="submit" disabled={!canSend} title="Send message" aria-label="Send message">
+                      <span aria-hidden="true">➤</span>
+                    </button>
+                  </div>
+                </div>
               </div>
+              <p className="chat-composer-hint">Enter to send. Shift+Enter for newline.</p>
             </form>
-
-            {streamPhases.length > 0 && (
-              <section className="chat-phases" aria-live="polite">
-                <strong>{isSending ? 'Live phase timeline' : 'Latest run timeline'}</strong>
-                <ol>
-                  {streamPhases.map((phase, idx) => (
-                    <li key={phase.id} className={idx === streamPhases.length - 1 && isSending ? 'chat-phase--active' : ''}>
-                      {phase.label}
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            )}
 
             {chatError && <p className="chat-error">{chatError}</p>}
           </div>
         </div>
       </section>
-    </div>
   )
 }

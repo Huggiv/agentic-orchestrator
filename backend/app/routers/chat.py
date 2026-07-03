@@ -462,6 +462,31 @@ def _effective_mode(session_mode: str, request_mode: str) -> str:
     return candidate
 
 
+def _has_grooming_context(metadata: dict[str, Any]) -> bool:
+    state = _normalize_grooming_state(metadata.get("grooming_state") or {})
+    if state.get("pending_field"):
+        return True
+    if any(state.get(field_name) for field_name in _GROOMING_REQUIRED_FIELDS):
+        return True
+    return str(metadata.get("trigger_state") or "") in {"grooming", "ready_to_trigger", "awaiting_confirmation"}
+
+
+def _should_use_grooming_flow(
+    *,
+    session: dict[str, Any],
+    metadata: dict[str, Any],
+    request_mode: str,
+    ticket_ids: list[str],
+) -> bool:
+    if request_mode == "grooming":
+        return True
+    if str(session.get("mode") or "") == "grooming":
+        return True
+    if ticket_ids:
+        return True
+    return _has_grooming_context(metadata)
+
+
 def _append_chat_message(
     *,
     session_id: str,
@@ -509,7 +534,7 @@ def _derive_jira_seed_state(prompt: str, issues: list[dict], existing_state: dic
 def create_chat_session(payload: ChatSessionCreateRequest, _user: dict = Depends(require_run_permission)):
     now = _utc_iso_now()
     session_id = f"chat-{uuid4().hex}"
-    mode = "support" if payload.mode == "interactive" else payload.mode
+    mode = "interactive" if payload.mode == "interactive" else payload.mode
     metadata = {
         "client_context": payload.client_context,
         "grooming_state": _normalize_grooming_state({}),
@@ -584,21 +609,56 @@ def send_chat_session_message(
 
     session_mode = _effective_mode(str(session.get("mode") or "support"), payload.mode)
     selected_model = payload.model or metadata.get("model") or session.get("selected_model")
+    ticket_ids = _extract_ticket_ids(prompt)
 
-    if session_mode == "grooming":
-        prior_state = _normalize_grooming_state(metadata.get("grooming_state") or {})
-        result = _build_grooming_response(prompt, prior_state)
+    issues: list[dict] = []
+    missing: list[str] = []
+    if ticket_ids:
+        for ticket_id in ticket_ids:
+            try:
+                issues.append(jira_service.get_issue(ticket_id))
+            except Exception:  # noqa: BLE001
+                missing.append(ticket_id)
+
+    if _should_use_grooming_flow(
+        session=session,
+        metadata=metadata,
+        request_mode=session_mode,
+        ticket_ids=ticket_ids,
+    ):
+        if ticket_ids and not issues:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "JIRA_ENRICHMENT_FAILED",
+                    "message": "No Jira tickets could be enriched from this prompt",
+                    "details": {"ticket_ids": ticket_ids},
+                },
+            )
+
+        prior_state = metadata.get("grooming_state") or {}
+        if issues:
+            prior_state = _derive_jira_seed_state(prompt, issues, prior_state)
+        result = _build_grooming_response(prompt, _normalize_grooming_state(prior_state))
         grooming_payload = result.get("grooming") or {}
         schema = grooming_payload.get("schema") or {}
         state = _normalize_grooming_state({**schema, "pending_field": grooming_payload.get("pending_field")})
+        valid_ticket_ids = [str(issue.get("key") or "").upper() for issue in issues if issue.get("key")]
+        jira_enrichment = {
+            "ticket_ids": valid_ticket_ids,
+            "fetched": bool(issues),
+            "missing": missing,
+        }
+
         metadata["grooming_state"] = state
         metadata["trigger_state"] = "ready_to_trigger" if grooming_payload.get("is_complete") else "grooming"
+        metadata["last_ticket_ids"] = valid_ticket_ids or list(metadata.get("last_ticket_ids") or [])
         metadata["model"] = selected_model
         metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}
 
         get_history_store().update_chat_session(
             session_id,
-            mode="grooming",
+            mode="interactive",
             selected_model=selected_model,
             updated_at=_utc_iso_now(),
             metadata=metadata,
@@ -607,18 +667,18 @@ def send_chat_session_message(
         assistant_message = _append_chat_message(
             session_id=session_id,
             role="assistant",
-            kind="text",
+            kind="grooming_review",
             content=str(result.get("assistant_message") or ""),
             payload={
                 "grooming": grooming_payload,
                 "trigger_state": metadata["trigger_state"],
-                "jira_enrichment": {"ticket_ids": [], "fetched": False, "missing": []},
+                "jira_enrichment": jira_enrichment,
             },
         )
         return {
             "session_id": session_id,
             "assistant_message": assistant_message,
-            "jira_enrichment": {"ticket_ids": [], "fetched": False, "missing": []},
+            "jira_enrichment": jira_enrichment,
             "grooming": grooming_payload.get("schema") or {},
             "trigger_state": {
                 "status": metadata["trigger_state"],
@@ -627,7 +687,6 @@ def send_chat_session_message(
             "user_message": user_message,
         }
 
-    ticket_ids = _extract_ticket_ids(prompt)
     if not ticket_ids:
         assistant_text = _respond_with_llm(prompt, selected_model)
         metadata["trigger_state"] = "draft"
@@ -635,7 +694,7 @@ def send_chat_session_message(
         metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}
         get_history_store().update_chat_session(
             session_id,
-            mode="support",
+            mode="interactive",
             selected_model=selected_model,
             updated_at=_utc_iso_now(),
             metadata=metadata,
@@ -660,77 +719,7 @@ def send_chat_session_message(
             "user_message": user_message,
         }
 
-    issues: list[dict] = []
-    missing: list[str] = []
-    for ticket_id in ticket_ids:
-        try:
-            issues.append(jira_service.get_issue(ticket_id))
-        except Exception:  # noqa: BLE001
-            missing.append(ticket_id)
-
-    if not issues:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "JIRA_ENRICHMENT_FAILED",
-                "message": "No Jira tickets could be enriched from this prompt",
-                "details": {"ticket_ids": ticket_ids},
-            },
-        )
-
-    seed_state = _derive_jira_seed_state(prompt, issues, metadata.get("grooming_state") or {})
-    grooming_result = _build_grooming_response(prompt, seed_state)
-    grooming_payload = grooming_result.get("grooming") or {}
-    schema = grooming_payload.get("schema") or {}
-    state = _normalize_grooming_state({**schema, "pending_field": grooming_payload.get("pending_field")})
-
-    valid_ticket_ids = [str(issue.get("key") or "").upper() for issue in issues if issue.get("key")]
-    metadata["grooming_state"] = state
-    metadata["trigger_state"] = "ready_to_trigger" if grooming_payload.get("is_complete") else "grooming"
-    metadata["last_ticket_ids"] = valid_ticket_ids
-    metadata["model"] = selected_model
-    metadata["client_context"] = payload.client_context or metadata.get("client_context") or {}
-
-    get_history_store().update_chat_session(
-        session_id,
-        mode="support",
-        selected_model=selected_model,
-        updated_at=_utc_iso_now(),
-        metadata=metadata,
-    )
-
-    jira_enrichment = {
-        "ticket_ids": valid_ticket_ids,
-        "fetched": True,
-        "missing": missing,
-    }
-    assistant_text = (
-        f"I fetched Jira details for {', '.join(valid_ticket_ids)} and drafted grooming output. "
-        "Review and continue refinement before trigger."
-    )
-    assistant_message = _append_chat_message(
-        session_id=session_id,
-        role="assistant",
-        kind="text",
-        content=assistant_text,
-        payload={
-            "jira_enrichment": jira_enrichment,
-            "grooming": grooming_payload,
-            "trigger_state": metadata["trigger_state"],
-        },
-    )
-
-    return {
-        "session_id": session_id,
-        "assistant_message": assistant_message,
-        "jira_enrichment": jira_enrichment,
-        "grooming": grooming_payload.get("schema") or {},
-        "trigger_state": {
-            "status": metadata["trigger_state"],
-            "recommendation": "ready" if grooming_payload.get("is_complete") else "needs_input",
-        },
-        "user_message": user_message,
-    }
+    raise HTTPException(status_code=422, detail="Unsupported chat state")
 
 
 @router.post("/chat/sessions/{session_id}/prepare-trigger")
@@ -794,7 +783,7 @@ def prepare_chat_session_trigger(
     assistant_message = _append_chat_message(
         session_id=session_id,
         role="assistant",
-        kind="text",
+        kind="session_confirmation",
         content="Trigger payload prepared. Review values and confirm to launch workflow.",
         payload={
             "orchestration_payload": run_payload,
