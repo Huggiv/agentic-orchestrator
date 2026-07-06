@@ -2155,7 +2155,21 @@ button:hover {
 }
 
 .pr-review-form-grid {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: start;
+}
+
+.pr-review-form-grid > * {
+  min-width: 0;
+}
+
+.pr-review-form-grid label {
+  min-width: 0;
+}
+
+.pr-review-form-grid input,
+.pr-review-form-grid select {
+  width: 100%;
 }
 
 .bulk-run-card {
