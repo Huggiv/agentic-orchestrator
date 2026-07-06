@@ -22,6 +22,17 @@ Consult Knowledge Sources when relevant.
 
 <knowledge_sources>
 
+## Repository Context Loading
+
+Before starting any implementation, load the relevant project context from `.github/`:
+
+1. **Always read** `.github/copilot-instructions.md` for project-wide conventions, architecture notes, and do-not patterns.
+2. Any instruction, agent, prompt, skill, or policy files found under the cloned repository's `.github/` tree, especially `*.instructions.md`, `*.agent.md`, `*.prompt.md`, and `SKILL.md`
+3. Repository-specific instruction files relevant to changed files outside `.github/`
+4. Local project conventions exposed by build files, config files, existing review artifacts, and the diff itself
+
+Treat these files as binding constraints. If a project instruction conflicts with a general best practice, the project instruction wins.
+
 ## Knowledge Sources
 
 - `docs/PRD.yaml`
