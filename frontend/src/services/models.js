@@ -9,6 +9,44 @@
 let _cachedModels = null
 let _pendingPromise = null
 
+function asNonEmptyString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : ''
+}
+
+export function normalizeModels(rawModels) {
+  if (!Array.isArray(rawModels)) return []
+
+  const seen = new Set()
+  const normalized = []
+
+  rawModels.forEach((item) => {
+    let id = ''
+    let name = ''
+
+    if (typeof item === 'string') {
+      id = asNonEmptyString(item)
+      name = id
+    } else if (item && typeof item === 'object') {
+      id =
+        asNonEmptyString(item.id)
+        || asNonEmptyString(item.value)
+        || asNonEmptyString(item.model)
+        || asNonEmptyString(item.slug)
+      name =
+        asNonEmptyString(item.name)
+        || asNonEmptyString(item.label)
+        || asNonEmptyString(item.display_name)
+        || id
+    }
+
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    normalized.push({ id, name })
+  })
+
+  return normalized
+}
+
 function fetchModels() {
   return fetch('/api/models')
     .then((res) => {
@@ -16,7 +54,7 @@ function fetchModels() {
       return res.json()
     })
     .then((data) => {
-      _cachedModels = Array.isArray(data.models) ? data.models : []
+      _cachedModels = normalizeModels(data.models)
       return _cachedModels
     })
     .catch(() => {

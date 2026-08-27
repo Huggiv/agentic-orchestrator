@@ -5,7 +5,7 @@ import ExecutingJobs from './ExecutingJobs'
 import ChatConsole from './ChatConsole'
 import JobFlowSteps, { computeFlowProgress, buildLogRows, RawLogsTable } from './JobFlowSteps'
 import { retryJob } from './services/orchestrate'
-import { getModels, refreshModels } from './services/models'
+import { getModels, normalizeModels, refreshModels } from './services/models'
 import { getSession, logout, canRunWorkflows, canManageHistory, ROLE_LABELS } from './services/auth'
 import LoginPage from './LoginPage'
 
@@ -230,7 +230,7 @@ export default function App() {
       const raw = await response.text()
       const data = parseApiPayload(raw)
       if (!response.ok) throw new Error(data.detail || 'Failed to fetch models')
-      const directModels = Array.isArray(data.models) ? data.models : []
+      const directModels = normalizeModels(data.models)
       setAvailableModels(directModels)
       return directModels
     } catch (err) {

@@ -13,6 +13,9 @@ router = APIRouter(prefix="/api", tags=["models"])
 # backend process lifetime.
 _cached_models: list[dict] | None = None
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+_MODEL_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*`?([^`|]+?)`?\s*\|")
+
 
 def _parse_model_table(output: str) -> list[dict]:
     """Parse a Markdown table row into {'name': ..., 'id': ...} entries.
@@ -21,17 +24,25 @@ def _parse_model_table(output: str) -> list[dict]:
         | Claude Sonnet 4.6 | `claude-sonnet-4.6` |
     """
     models: list[dict] = []
-    for line in output.splitlines():
-        # Match rows that have at least two pipe-separated cells where the
-        # second cell contains a backtick-quoted identifier.
-        m = re.match(r"^\|\s*([^|]+?)\s*\|\s*`([^`]+)`\s*\|", line)
-        if not m:
+    seen_ids: set[str] = set()
+
+    normalized_output = _ANSI_ESCAPE_RE.sub("", output)
+    for line in normalized_output.splitlines():
+        # Match rows with a human label and model identifier. Newer CLI output
+        # may omit backticks around IDs, so both forms are supported.
+        m = _MODEL_ROW_RE.match(line.strip())
+        if m is None:
             continue
         name = m.group(1).strip()
         model_id = m.group(2).strip()
         # Skip header rows (e.g. "Model | ID")
         if not name or not model_id or name.lower() in ("model", "-", "---"):
             continue
+        if model_id.lower() in ("id", "-", "---"):
+            continue
+        if model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
         models.append({"name": name, "id": model_id})
     return models
 
@@ -55,6 +66,13 @@ def _load_models() -> list[dict]:
         raise HTTPException(status_code=504, detail="copilot CLI timed out listing models")
 
     models = _parse_model_table(output)
+    if not models and result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        detail = "copilot CLI failed to list models"
+        if stderr:
+            detail = f"{detail}: {stderr}"
+        raise HTTPException(status_code=503, detail=detail)
+
     _cached_models = models
     return _cached_models
 
